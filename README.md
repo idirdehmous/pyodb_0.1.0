@@ -20,7 +20,8 @@ Some modifictions have been done to make it compatible with C/Python API ( 3.8 -
 
 ## INSTALLATION :  
 
-   ```  STEP 0 - clone the code:
+   ```  
+        STEP 0 - clone the code:
                git clone https://github.com/idirdehmous/pyodb_0.1.0 
    
         STEP 1 - CREATE A BUILD DIRECORY TO INSTALL THE ODB LIBRARIES FIRST.
@@ -28,4 +29,23 @@ Some modifictions have been done to make it compatible with C/Python API ( 3.8 -
                cd build_odb 
                cmake -DCMAKE_INSTALL_PREFIX=/path/to/the/odb/install/dir     ../pyodb_0.1.0 
                make -j ncpu    ( has been tested with a maximum of 4  cpus  ) 
-               make install  ```
+               make install  
+```
+REMARK:
+-By the end the configuration, a file called 'odb_install_dir' will be created by cmake for the next steps 
+
+-Once the odb binaries , include and libs are installed, The second step consist in builing and installing the python module
+
+```
+        STEP 2 - cd  /path/to/source/of/.../pyodb_0.1.0  
+              python  setup.py   build  
+              *Standard installation 
+                sudo  python  setup.py   install  
+
+              *Local directory installation 
+                 python setup.py   install  --prefix=/../../../your/pythonlibs 
+```
+
+## TESTING & EPILOGUE 
+
+
