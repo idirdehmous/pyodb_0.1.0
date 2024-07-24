@@ -57,6 +57,8 @@ REMARK:  <br />
 
               *Local directory installation 
                  python setup.py   install  --prefix=/../../../your/pythonlibs 
+In this case add the path to PYTHONPATH env variable :
+export  PYTHONPATH=$PYTHONPATH:/somewhere/pylibs/lib/python3.x/site-packages/pyodb-0.1.0-py3.x-linux-x86_64.egg
 ```
 
 ## Testing 
