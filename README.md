@@ -25,10 +25,10 @@ Some modifictions have been done to make it compatible with C/Python API ( 3.9 -
         FLEX         >= 2.6.0 
 
 ==> It has been widely developed and tested on ATOS. <br />
-So on ATOS  :
-   module load   gcc/8.5.0
-   module load   python3/3.10.10-01
-   module load   cmake/3.25.2
+So on ATOS  : <br />
+   module load   gcc/8.5.0            <br />
+   module load   python3/3.10.10-01   <br />
+   module load   cmake/3.25.2         <br />
 
 
 ## installation :  
@@ -37,17 +37,17 @@ So on ATOS  :
         STEP 0 - clone the code:
                git clone https://github.com/idirdehmous/pyodb_0.1.0 
    
-        STEP 1 - CREATE A BUILD DIRECORY TO INSTALL THE ODB LIBRARIES FIRST.
+        STEP 1 - FIRST, CREATE A BUILD DIRECORY TO INSTALL THE ODB LIBRARIES.
                mkdir -p  build_odb  
                cd build_odb 
                cmake -DCMAKE_INSTALL_PREFIX=/path/to/the/odb/install/dir     ../pyodb_0.1.0 
                make -j ncpu    ( has been tested with a maximum of 4  cpus  ) 
                make install  
 ```
-REMARK:
--By the end the configuration, a file called 'odb_install_dir' will be created by cmake for the next steps<br />
+REMARK:  <br />
+-By the end the configuration, a file called 'odb_install_dir' will be created by cmake for the next step<br />
 
--Once the odb binaries , include and libs are installed, The second step consist in builing and installing the python module itself<br />
+-Once the odb binaries , include and libs are installed, the second step consist in building and installing the python module itself<br />
 
 ```
         STEP 2 - cd  /path/to/source/of/.../pyodb_0.1.0  
@@ -60,13 +60,13 @@ REMARK:
 ```
 
 ## Testing 
--When a module build from C/Python API is imported, the python statement 'import' initialises some functions involved during the compilation (headers,  libraries etc ). One has then firstly to load the shared objects using 'ctypes' module.<br /> 
+-When a C/Python API extension is imported, the python statement 'import' initialises some functions involved during the compilation (headers,  libraries etc ). One has then, firstly to load the shared objects using 'ctypes' module. <br /> 
 -The pyodb installation is tested as follow : 
 ```
 from ctypes import  cdll  
-cdll.LoadLibrary(  "/path/to/odb/libs/libodb.so"  )
+cdll.LoadLibrary(  "/path/to/odb/install dir/../../libodb.so"  )
 
-#-If the shared library ( libodb.so) is loaded successfully then 
+#-If the shared library ( libodb.so) is loaded successfully then !
 
 import pyodb
 print( pyodb.__doc__) 
@@ -74,7 +74,7 @@ print( pyodb.__doc__)
 -For a complete import test script, please see 'tests/test_import.py'  
 
 ## Epilogue 
--If everything went well,one can use the examples scripts under  'pyodb_0.1.0/tests' and reading the ODB(s) samples included in 'pyodb_0.1.0/odb_samples'. <br />
+-If everything went well,one can use the example scripts under 'pyodb_0.1.0/tests' and reading the ODB(s) samples included in 'pyodb_0.1.0/odb_samples'. <br />
 
 
 General info
@@ -85,11 +85,11 @@ Tested with ODB(s)  : RMI ,CHMZ , MetCoOp and CHMI
 Handled observations: Conventional, GNSS , Radar  & Sat Radiances.
 
 Some limitations   
-Support  formula   SQL statement    : NOT YET 
-  //     OpenMP                     : NOT YET 
-  //     Read/Write to ECMA,CCMA    : NO 
-  //     conversion to ODB2         : NOT YET 
-  //     conversion to MySQL,SQLite : NOT YET 
+Supports  formula   SQL statement    : NOT YET   ( i.e  SELECT degrees(lat  ), degrees(lon) ...   )
+  //      OpenMP                     : NOT YET 
+  //      Read/Write to ECMA,CCMA    : NO        ( READ ONLY )
+  //      conversion to ODB2         : NOT YET   ( On going  )
+  //      conversion to MySQL,SQLite : NOT YET   ( On going  )
 
 
 ----------------------------------
