@@ -85,14 +85,14 @@ Tested with ODB(s)  : RMI ,CHMZ , MetCoOp and CHMI  <br />
 Handled observations: Conventional, GNSS , Radar  & Sat Radiances. <br />
 
 Some limitations    <br />
-Supports  formula   SQL statement    : NOT YET   ( i.e  SELECT degrees(lat  ), degrees(lon) ...   ) <br />
-  //      OpenMP                     : NOT YET    <br />
-  //      Read/Write to ECMA,CCMA    : NO        ( READ ONLY ) <br />
-  //      conversion to ODB2         : NOT YET   ( On going  ) <br />
-  //      conversion to MySQL,SQLite : NOT YET   ( On going  ) <br />
+Supports  formula   SQL statement    : NOT YET   ( i.e  SELECT degrees(lat  ), degrees(lon)... ) <br />
+	  OpenMP                     : NOT YET    <br />
+	  Read/Write to ECMA,CCMA    : NO        ( READ ONLY ) <br />
+	  conversion to ODB2         : NOT YET   ( On going  ) <br />
+	  conversion to MySQL,SQLite : NOT YET   ( On going  ) <br />
 
 
 @__DATE              :  2024.07.23    <br />
-@__INSITUTE          :  RMI ( Royale Meteorological Institute )   <br />
+@__INSTITUTE         :  RMI ( Royale Meteorological Institute )   <br />
 @__AUTHOR            :  Idir DEHMOUS    <br />
 @__LAST_MODIFICATION :  None.      <br />
