@@ -1,21 +1,30 @@
 ## pyodb_0.1.0
 
 ## Descrption & prologue 
-This is the version 0.1.0  BETA of pyodb.
+This is the version 0.1.0  BETA of pyodb.<br \>
 An interface written in C/Python API to access the ECMWF ODB1 databases
 
 Its aim is to access the ODB tables/columns data and meta data using a direct SQL request
-embadded in python scripts.
+embadded in python scripts.<br\>
 
 The main source code is written in pure C and the routines handling the ODB1
 format has been 'pruned' from ECMWF ODB_API bundle-0.18.1 to build only the
-needed libraries
+needed libraries <br\>
 
 Reference:
 The original C code has been developed by "Sami Saarinen et al" at ECMWF from 1998 --> 2008
-Some modifictions have been done to make it compatible with C/Python API ( 3.8 ---> 3.11 ).
+Some modifictions have been done to make it compatible with C/Python API ( 3.9 ---> 3.11 ).
 
 ## How it works ?
+
+## Dependencies :
+        gcc compiler >= 8.4.0    
+        cmake        >= 3.15.0   
+        python       >= 3.10.0 
+        BISON        >= 3.0.4 
+        FLEX         >= 2.6.0 
+
+
 
 
 ## installation :  
