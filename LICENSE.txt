@@ -10,16 +10,16 @@ which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
 In applying this licence, ECMWF does not waive the privileges and immunities granted to it by
 virtue of its status as an intergovernmental organisation nor does it submit to any jurisdiction.
 
-----------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------
 THIS SOFTWRE IS AN EXTENSION OF THE ORIGINAL ODB (FORMAT 1 ) DEVELOPED
 ORIGINALLY BY Sami SAARINEN et al ECMWF  1998 --> PRESENT
 
-THE ORIGINAL CODE WAS IN PURE C/SQL + FORTRAN MODULE LANGUAGES, IT'S THE SAME
-THAT IS USED IN THE ARPEGE/IFS MODELS
+THE ORIGINAL CODE WAS IN PURE C/SQL LANGUAGES + SOME FORTRAN MODULE. IT'S THE SAME
+SOURCE CODE AS THE ONE USED IN THE ARPEGE/IFS MODELS
 
 
-HOWEVER SOME CHANGES HAVE BEEN DONE TO MAKE IT COMPATIBLE WITH THE C/PYTHON API
-----------------------------------------------------------------------------
+HOWEVER SOME CHANGES HAVE BEEN DONE TO MAKE IT COMPATIBLE WITH THE pyodb_0.1.0 C/PYTHON INTERFACE !
+----------------------------------------------------------------------------------------------------
 
 
 
