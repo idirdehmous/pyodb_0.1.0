@@ -1,4 +1,0 @@
-pyodb
-pyodb_dca
-pyodb_info
-pyodb_io
