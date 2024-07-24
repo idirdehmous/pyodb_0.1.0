@@ -1,0 +1,38 @@
+[build-system]
+requires      = ["setuptools>=68.0.0"]
+build-backend =  "setuptools.build_meta"
+
+
+[project]
+name             = "pyodb"    
+version          = "0.1.0"  
+description      = "C/Python interface to request data from the ECMWF ODB old format database (ECMA ;CCMA)"
+#requires-python = ">=3.10"
+readme           = "README.md"
+license          = {file = "LICENSE.txt"}
+keywords         = ["ODB","ECMA","CCMA", "data", "conversion","extraction", "ECMWF", "RMI"]
+authors          = [   {name = "Idir DEHMOUS",email = "idehmous@meteo.be" } ]
+
+maintainers = [{name = "Idir DEHMOUS", email = "idehmous@meteo.be" }]
+
+#dynamic=
+classifiers = [
+  "Development Status   :: 1 - Beta",
+  "Intended Audience    :: Developers ,researchers",
+  "Topic                :: Software Development :: Build Tools , ODB API",
+  "License              :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programmin Language  :: C"             ,
+  "Operating System     :: OS dependent"]
+
+
+[tool.setuptools.packages.find]
+where      = ["pycc"]         # ["."] by default
+include    = ["include*"]     # ["*"] by default
+exclude    = ["tests"]
+namespaces = false            #       true by default
+
+
