@@ -1,21 +1,26 @@
 ## pyodb_0.1.0
 
 ## Descrption & prologue 
-This is the version 0.1.0  BETA of pyodb.<br \>
+This is the version 0.1.0  BETA of pyodb.<br />
 An interface written in C/Python API to access the ECMWF ODB1 databases
 
 Its aim is to access the ODB tables/columns data and meta data using a direct SQL request
-embadded in python scripts.<br\>
+embadded in python scripts.<br />
 
 The main source code is written in pure C and the routines handling the ODB1
 format has been 'pruned' from ECMWF ODB_API bundle-0.18.1 to build only the
-needed libraries <br\>
+needed libraries <br />
 
 Reference:
-The original C code has been developed by "Sami Saarinen et al" at ECMWF from 1998 --> 2008
+The original C code has been developed by "Sami Saarinen et al" at ECMWF from 1998 --> 2008.  <br />
 Some modifictions have been done to make it compatible with C/Python API ( 3.9 ---> 3.11 ).
 
 ## How it works ?
+
+GENERAL INFO        :
+USED LANGUAGE       : C / python /Fortran 
+NEEDS INSTALLATION  : YES  
+NEEDS COMPILATION   : YES 
 
 ## Dependencies :
         gcc compiler >= 8.4.0    
@@ -24,7 +29,11 @@ Some modifictions have been done to make it compatible with C/Python API ( 3.9 -
         BISON        >= 3.0.4 
         FLEX         >= 2.6.0 
 
-
+----> It has been widly developed and tested on ATOS. <br />
+So on ATOS  :
+   module load   gcc/8.5.0
+   module load   python3/3.10.10-01
+   module load   cmake/3.25.2
 
 
 ## installation :  
@@ -73,5 +82,9 @@ print( pyodb.__doc__)
 ## Epilogue 
 -If everything went well,one can use the examples scripts under  'pyodb_0.1.0/tests' and reading the ODB(s) samples included in 'pyodb_0.1.0/odb_samples'. <br />
 
-
+----------------------------------
+@__DATE              :  2024.07.23
+@__INSITUTE          :  RMI ( Royale Meteorological Institute )
+@__AUTHOR            :  Idir DEHMOUS 
+@__LAST_MODIFICATION :  Up to date. 
 
