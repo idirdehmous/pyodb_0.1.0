@@ -23,16 +23,13 @@ extern PyObject* pyodb_NotSupportedError;*/
 
 
 /*extern  int  IOstat  (  int id )   {
-
 typedef unsigned int UINT     ;
-
 struct IOstatus  {
       UINT  ODB_OK    ;
       UINT  ODB_ERROR ;
    };
-
 //typedef struct IOstatus {
-//     int ODB_OK    = 0 ; 
+//   ODB_OK    = 0 ; 
 //   ODB_ERROR = 1
 //   ODB_BUSY  = 5
 //   ODB_ROW   = 100
@@ -40,9 +37,7 @@ struct IOstatus  {
 //   ODB_METADATA_CHANGED = 102
 //   ODB_STATIC = ctypes.c_void_p(0)
 //} status  ;
-
 typedef struct IOstatus  io  ; 
-
 return  0  ;
 }*/
 
@@ -118,6 +113,24 @@ void tostring(char str[], int num)
     }
     str[len] = '\0';
 }
+
+
+extern  int get_strlen( const char*    string  ) ;
+
+
+int get_strlen (  const char *  string  ) {
+int str_len  ;
+
+if ( string  ) {
+str_len=  strlen( string );
+} else  {
+str_len=0   ;
+};
+
+return str_len ;
+}
+
+
 
 
 
