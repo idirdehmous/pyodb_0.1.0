@@ -73,7 +73,6 @@ print( pyodb.__doc__)
 ```
 -For a complete import test script, please see 'tests/test_import.py'  
 
-
 ## Epilogue 
 -If everything went well,one can use the examples scripts under  'pyodb_0.1.0/tests' and reading the ODB(s) samples included in 'pyodb_0.1.0/odb_samples'. <br />
 
