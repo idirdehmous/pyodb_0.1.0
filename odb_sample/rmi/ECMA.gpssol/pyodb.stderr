@@ -1,0 +1,49 @@
+***Error: Given database directory does not exist. Check your '-i dbdir'
+***Error: Unable to determine the database name. Check your '-l dbname'
+***Error: Unable to locate the main metadata file (ddfile 'ECMA.gpssol/.dd')
+***Error(s) were detected
+=======================================================================
+
+     Script dcagen  
+     -------------    
+                         
+     Purpose     : Creates Direct Column Access-files for given ODB
+                   to improve post-processing & direct column access
+                   from ODB tables
+                               
+     Usage       : dcagen [-l dbname] [-t table] [-f] [-d] [-n] [-u] [-i dbdir] [-v] [-N cpus]
+                          [-F] [-b] [-B bufsiz] [-z] [-g] [-c colname@table] [-C colname@table]
+                          [-x] [-Q] [-m] [-o output_file_prefix] [-D cache_disk] [-a] [-A] [-I] [-P]
+                          [-e errlog] [-E errlog]
+                                            
+     Parameters  : -l dbname - database name (default: from *.dd file name)
+     ----------    -t table  - table name (can be supplied multiple times)
+                   -f        - force to continue despite fatal errors
+                   -F        - force to create despite already exists
+                   -d        - turn debugging on
+                   -n        - do NOT update i.e. DO NOT use -u option for dcagen.x (the default)
+                   -u        - use option -u for dcagen.x
+                   -i dbdir  - Database directory (default: "." i.e. current dir)
+                   -v        - Produce verbose output
+                   -N        - How many CPUs to use to parallelize dcagen over multiple tables (default=3)
+                   -b        - Create binary DCA-file instead of text
+                   -B bufsiz - Override the ODB_CACHE_LIMIT used with -c/-C (in MBytes) (default=128)
+                   -z        - Remove zero-length DCA-files (by default NOT removed)
+                   -g        - DCA-files (binary or text) will be gzip'ped, if possible (by default: not)
+                   -c c@t    - Create cache of column 'c@t' values to file cache/c@t.<#>
+                   -C c@t    - Create unpacked cache of column 'c@t' values to file cache/c@t.<#>
+                   -q        - Quiet option : Do not print dots (....) in show progress in non-verbose mode
+                   -x        - Extract poolno,nrows,nmdis,cardinality,min,max of column(s) given by -c/-C
+                   -m        - Same as -x, but prints only column name followed by aggregate min & max
+                   -Q        - Quickmode: same as -x, but quits after the first input file has been processed
+                   -o prefix - *ALL* cacheable files will be written to file(s) cache/prefix.cache.%d. Implies -N 1
+                                If set to %s, then prefix will be based on prevailing tablename
+                   -D cachedisk - root-path for cache-disk i.e. ODB_CACHE_DISK (default=cache)
+                   -a        - cache all encountered columns. Do NOT unpack them (-C colname and -A override)
+                   -A        - cache all encountered columns. Unpack them before caching
+                   -I        - Do *NOT* (re-)create $dbname.IOASSIGN-file (even if it did not exist)
+                   -P        - Prevent from running odbprune recursively (f.ex. when dcagen is called from odbprune)
+                   -e errlog - Enforce stderr output to file errlog
+                   -E errlog - Enforce stderr output to file errlog; as -e, but append to the existing errlog
+
+=======================================================================
