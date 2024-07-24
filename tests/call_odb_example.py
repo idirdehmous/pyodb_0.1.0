@@ -10,10 +10,6 @@ from parser  import ParseString
 from environment  import  OdbEnv 
 from exceptions import *  
 
-
-# WHERE libodb.so  is installed  ? 
-basedir="/home/micro/Bureau/odb/odb_env"
-
 # GET ARGS from COMMAND LINE 
 nargv = len(sys.argv)
 if nargv > 1 :
@@ -29,8 +25,15 @@ else :
   exit(1)
 
 
+# WHERE libodb.so  is installed  ? 
+odb_install_dir=os.getenv( "ODB_INSTALL_DIR" )
+if odb_install_dir== None:
+   # SET THE PATH EXPLICITY 
+   odb_install_dir="/hpcperm/cvah/odb/odb_env"
+
+
 # INIT ENV 
-env= OdbEnv(basedir, "libodb.so")
+env= OdbEnv(odb_install_dir , "libodb.so")
 env.InitEnv ()
 
 # --> NOW pyodb could be imported  !

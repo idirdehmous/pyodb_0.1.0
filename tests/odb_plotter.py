@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
 import readline 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
 
 import os,sys
 import ctypes 
@@ -55,7 +53,7 @@ db_name = p.getDb ( path=dbpath )[1]  # ECMA.<obstype> or CCMA
 
 
 # SQL QUERY 
-sql="select distinct statid, lat, lon ,obsvalue , varno , date , time from hdr,body where varno==39 order by statid"
+sql="select distinct statid, lat, lon ,obsvalue , varno , date , time from hdr,body"
 p.ParseQuery( sql )
 
 
@@ -67,7 +65,7 @@ if dstat==-1:
    sys.exit(2)
 
 #sqlfile="sql/ccma_view.sql"
-# THE METHOD COULD BE CALLED WITH sql QUERY or  sql file  (ONE IS MANDATORY !)
+# THE METHOD COULD BE CALLED WITH sql QUERY or  sql file  (ONE OF THEM REQUIERED  !)
 rows=pyodbFetch( dbpath , sql_query = sql)  #, queryfile=sqlfile   )
 
 
@@ -82,8 +80,8 @@ for row in   rows:
     obs.append ( row[3] )
 
 # DOMAIN BOUNDARIES 
-if len(lats) != 0: ulat=max(lats)+2 ; llat=min(lats)-2
-if len(lons) != 0: ulon=max(lons)+2 ; llon=min(lons)-2
+if len(lats) != 0: ulat=max(lats)+1.5 ; llat=min(lats)-1.5
+if len(lons) != 0: ulon=max(lons)+1.5 ; llon=min(lons)-1.5
 
 # PLOT 
 fig = plt.figure(figsize=(10, 15))
@@ -93,13 +91,11 @@ ax.coastlines()
 ax.set_extent([llon, ulon  ,llat ,ulat], crs=ccrs.PlateCarree())
 ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='blue')
 ax.gridlines(draw_labels=True)
-ax.set_title( "AMDAR temperature ,varno=59 ,CMA type ECMA.synop , datetime = 20211004 1200\nDomain : RC-LACE " )
 sc=plt.scatter ( lons, lats ,c=obs , cmap=plt.cm.jet ,marker='o',s=20, zorder =111,transform=ccrs.PlateCarree() )
 
 divider = make_axes_locatable(ax)
 ax_cb = divider.new_horizontal(size="5%", pad=0.9, axes_class=plt.Axes)
 fig.add_axes(ax_cb)
 plt.colorbar(sc, cax=ax_cb)
-plt.savefig("ECMA-synop_sample_chmi-lace.pdf" )
 plt.show()
 
