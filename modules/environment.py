@@ -66,7 +66,7 @@ class OdbEnv:
                  try:
                     os.environ[k] = v
                  except:
-                    raise pyodbEnvError ("The ODB env variable{k}name not recongnized !", k  )
+                    raise pyodbEnvError ("The ODB env variable{}name not recongnized !".format( k  )  )
 
              
 
