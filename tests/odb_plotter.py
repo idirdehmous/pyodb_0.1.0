@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import readline 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
