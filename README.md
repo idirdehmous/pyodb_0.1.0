@@ -47,8 +47,8 @@ REMARK:
 ```
 
 ## Testing 
--When the modules build from C/Python API are imported, the python statement initialises some functions involved during compilation (headers,  libraries etc ). One has firstly to load the shared objects using 'ctypes module'
--The pyodb installation is tested as follow :
+-When a module build from C/Python API is imported, the python statement 'import' initialises some functions involved during the compilation (headers,  libraries etc ). One has then firstly to load the shared objects using 'ctypes module'. 
+-The pyodb installation is tested as follow : <br /> 
 ```
 from ctypes import  cdll  
 cdll.LoadLibrary(  "/path/to/odb/libs/libodb.so"  )
