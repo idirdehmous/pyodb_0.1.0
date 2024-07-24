@@ -1,0 +1,431 @@
+#!/bin/ksh
+trap 'echo "odbdup: Received signal, aborting ..."; wait; exit 1' 1 2 3 15
+#begin
+#
+# Usage: odbdup [-c] [-F] -i input_db_dir -o output_db_dir [-l output_dbname] [-D] [-L] [-r] [-Q] [-s]
+#
+# Purpose: Duplicates existing database with a different name
+#          The duplicate is a copy only if "-c" option used, otherwise
+#          actual data (i.e. not metadata) is symbolically linked to the
+#          originating database.
+#          The use of this facility enables (say) a concurrent access two databases
+#          which originally had the same name, since now two ODB_open()'s are
+#          applied to different database names -- thus bypassing one of the ODB
+#          limitations not being able to concurrently ODB_open() two databases of
+#          a similar name.
+#
+# Notes: 1) Any recompilations must take place outside this script
+#        2) If the copy-option is used, then the resulting database is self-contained
+#           and can be tar'red up or modified without consequences to the originating
+#           database
+#        3) Output database name is guessed from output database directory name,
+#           but can be bypassed by use of -l option
+#        4) Input database name is determined from the .dd-file name residing in
+#           the input (originating) database directory
+#
+# -i input_db_dir  : Input database directory ; name derived from its .dd-file prefix
+#                    Can be supplied multiple times to enable composite database
+#                    Caveat: Multiple -i's disable existing cache/ dirs and dca/ dirs
+#                            Multiple -i's also imply creation of dca/ dir regardless if -D option was used or not
+# -o output_db_dir : Database to be created either copying or symbolically linking the data
+# -c : Copy existing database from input_db_dir to output_db_dir
+#      By default only metadata from the existing database is copied (and renamed), and
+#      data is symbolically linked (this saves potentially lots of space)
+# -F : Enforces to create output_db_dir, even if it already exists, in which case
+#      the existing one is removed first
+# -l output_dbname : Name of the output database, unless can be derived from the output_db_dir
+# -D : Do not run dcagen
+# -L : Apart from metadata, copy & rename also the database library from the input_db_dir
+#      (this option has not been implemented yet due to problems with different symbol names)
+# -r : Retains metadata, but removes data (-links) from output_db_dir. This option
+#      will ignore -c options and symbolic links for data
+# -m : Allow mismatch in database names
+# -Q : Do *NOT* use greatly speeded up dcagen (=dcaquick) maybe because
+#      input dca-files are binary, gzipped or otherwise invalid for dcaquick
+# -P : Do *NOT* run odbprune
+# -s : Run silently
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 15-Mar-2005 : Initial version
+#                               27-May-2005 : Added doc about options
+#                               27-May-2005 : -D option prevents running the dcagen
+#                               27-May-2005 : -r option retains metadata, but removes data
+#                               27-May-2005 : -L options copies & renames the lib$input_db.a (N/W)
+#                               22-Feb-2006 : Bring over the possible cache/ directory, too
+#                               13-Mar-2006 : Allow multiple -i options to enable composite databases
+#                               03-Apr-2006 : Option -m added
+#                               13-Nov-2006 : Option -Q added
+#                               13-Feb-2006 : Option -P added
+#                               21-Dec-2006 : Option -s added
+#
+#-----------------------------------------------------------------------
+
+set +xv
+set -eu
+
+thisdir=$(pwd)
+
+cmd=$0
+thiscmd=$(basename $0)
+
+if [[ $# -gt 0 ]] ; then
+  ARGS="${thiscmd} $*"
+else
+  ARGS="${thiscmd}"
+fi
+
+#-----------------------------------------------------------------------
+
+FLAGS=cDFi:l:L:mo:PQrs
+
+copy=0
+dcagen=1
+enforce=0
+indb=""
+inputdirs=""
+libtoo=0
+output=""
+outdb=""
+remdata=0
+mismatch=0
+dcaquick=1
+prune=1
+silent=0
+
+abort=no
+while getopts ${FLAGS} i
+do
+  case $i in
+  c)    copy=1;;
+  D)    dcagen=0;;
+  F)    enforce=1;;
+  i)    inputdirs="$inputdirs $OPTARG";;
+  l)    outdb="$OPTARG";;
+  L)    libtoo=1;;
+  m)    mismatch=1;;
+  o)    output="$OPTARG";;
+  P)    prune=0;;
+  Q)    dcaquick=0;;
+  r)    remdata=1;;
+  s)    silent=1;;
+  *)	abort=yes; break;;
+  esac
+done
+
+shift $(expr $OPTIND - 1)
+
+if [[ $# -gt 0 ]] ; then
+  abort=yes
+fi
+
+if [[ $silent -eq 0 ]] ; then
+  echo "$ARGS" >&2
+fi
+
+#-----------------------------------------------------------------------
+# Check obvious error(s)
+#-----------------------------------------------------------------------
+
+if [[ "$outdb" = "" ]] ; then
+  outdb=$(basename "$output")
+fi
+outdb=$(echo "$outdb" | perl -pe 's/\s+//g; s/\..*//; tr/[a-z]/[A-Z]/; s/[_-]//g')
+
+if [[ "$output" = "" ]] ; then
+  echo "***Error: Output database directory must be given" >&2
+  abort=yes
+elif [[ -d $output && $enforce -eq 0 ]] ; then
+  echo "***Error: Output database directory already exists. Use -F flag to enforce overwrite" >&2
+  abort=yes
+fi
+
+if [[ $abort = no ]] ; then
+#- Output database dirs basename cannot contain '-' --> filter them out & reconstruct
+  apath=$(dirname $output)
+  adir=$(basename $output | perl -pe 's/-//g')
+  output="$apath/$adir"
+fi
+
+ninp=0  # Number of input dirs
+indb="" # Input database name
+glbnpools=0
+
+if [[ $abort = no && "$inputdirs" != "" ]] ; then
+  typeset tmp=""
+  typeset d
+  for d in $(exec 2>/dev/null; /bin/csh -c "/bin/ls -dC1 $inputdirs || :")
+  do
+    if [[ -d $d ]] ; then
+      tmp="${tmp}$d "
+      if [[ $prune -eq 1 ]] ; then
+        # a hack; for now ... before odbprune -E & dcagen work together
+        if [[ ! -f $d/.odbprune_done ]] ; then
+          odbprune -i $d >/dev/null 2>&1 || : &
+        fi
+      fi
+    fi
+  done
+  inputdirs=$tmp
+fi
+
+refset=0
+refdb=""
+refiom=0
+
+if [[ $abort = no && "$inputdirs" = "" ]] ; then
+  echo "***Error: Input database directory/-ies must be given" >&2
+  abort=yes
+elif [[ $abort = no ]] ; then
+  typeset input
+  for input in $inputdirs
+  do
+#    if [[ $silent -eq 0 ]] ; then
+#      echo "Processing ddfile in $input" >&2
+#    fi
+    typeset ddfile
+    if [[ -d $input ]] ; then
+      ddfile=$(set +e ; \cd $input >/dev/null 2>&1 ; \ls -C1 *.dd 2>/dev/null | head -1)
+    else
+      ddfile="$(basename "$input" |  perl -pe 's/\s+//g; s/\..*//; tr/[a-z]/[A-Z]/; s/[_-]//g').dd"
+    fi
+    indb=$(basename "$ddfile" .dd | perl -pe 's/\s+//g; s/\..*//; tr/[a-z]/[A-Z]/; s/[_-]//g')
+    ddfile="$indb.dd"
+
+    typeset iom=0
+    typeset npools=0
+
+    if [[ ! -d $input ]] ; then
+      echo "***Error: Input database directory '$input' does not exist" >&2
+      abort=yes
+    elif [[ ! -f $input/$ddfile ]] ; then
+      echo "***Error: The main metadata input file '$input/$ddfile' not found" >&2
+      abort=yes
+    else
+      iom=$(head -1 $input/$ddfile | awk 'BEGIN {n=1;} {if (NF >= 3) n=$3;} END {print n;}')
+      npools=$(head -5 $input/$ddfile | tail -1)
+    fi
+
+    if [[ "$input" = "$output" ]] ; then
+      echo "***Error: Input and output directories must differ" >&2
+      abort=yes
+    fi
+
+    if [[ $abort = no ]] ; then
+      if [[ $refset -eq 0 ]] ; then # set reference database (based on the 1st database in list)
+        refdb=$indb
+	refiom=$iom
+        refset=1
+      fi
+      if [[ $iom -ne $refiom ]] ; then
+        echo "***Error: Reference database (at $input) mismatch in I/O-method: Was $iom, expecting $refiom" >&2
+        abort=yes
+      fi
+
+      if [[ "$indb" != "$refdb" ]] ; then
+        if [[ $mismatch -eq 0 ]] ; then
+          echo "***Error: Reference database name mismatch (at $input): Was '$indb', expecting '$refdb'" >&2
+          abort=yes
+        else
+          echo "***Warning: Reference database name mismatch (at $input): Was '$indb', expecting '$refdb'" >&2
+        fi
+      fi
+    fi
+
+    if [[ $abort = no ]] ; then
+      ((glbnpools+=npools))
+      ((ninp+=1))
+#      if [[ $silent -eq 0 ]] ; then
+#        echo "Processing of $ddfile in $input done." >&2
+#      fi
+    fi
+  done
+fi
+
+if [[ $abort = no && $glbnpools -eq 0 ]] ; then
+  echo "***Error: Global number of input pools cannot be zero" >&2
+  abort=yes
+fi
+
+if [[ $abort = no ]] ; then
+  if [[ -d $output ]] ; then
+    \mv $output $output.$$
+    rm -rf $output.$$ &
+  fi
+
+  mkdir -p $output || {
+    echo "***Error: Cannot create output database directory" >&2
+    abort=yes
+  }
+fi
+
+#-----------------------------------------------------------------------
+
+if [[ $abort = yes ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//' >&2
+  wait
+  exit 1
+fi
+
+#-----------------------------------------------------------------------
+
+if [[ $silent -eq 0 ]] ; then
+  echo "Copy option (on=1/off=0) : $copy"     >&2
+  echo "Enforce-option           : $enforce"  >&2
+  echo "dcagen-option (-D)       : $dcagen"   >&2
+  echo "dcaquick-option (-Q)     : $dcaquick" >&2
+  echo "Library-option           : $libtoo"   >&2
+  echo "Retain/remove-option     : $remdata"  >&2
+  echo "Allow DB-name mismatches : $mismatch" >&2
+fi
+
+#-----------------------------------------------------------------------
+
+output=$(\cd $output >/dev/null 2>&1 ; echo $(pwd))
+if [[ $silent -eq 0 ]] ; then
+  echo "Output database=$outdb at '$output'" >&2
+  echo "Number of input databases = $ninp" >&2
+fi
+
+#-----------------------------------------------------------------------
+
+wait
+
+meta="dd sch flags iomap"
+
+if [[ $refiom -eq 4 ]] ; then
+  echo "2" > $output/$outdb.iomap # use I/O-map file format#2
+  sub="&"
+  wait=wait
+else
+  sub=""
+  wait=""
+fi
+
+typeset ndbs=0
+typeset nglb=1
+typeset input
+for input in $inputdirs
+do
+  cd $thisdir
+  input=$(\cd $input >/dev/null 2>&1 ; echo $(pwd)) # becomes absolute path
+
+  typeset ddfile
+  cd $input
+  ddfile=$(\ls -C1 *.dd 2>/dev/null | head -1)
+  indb=$(basename "$ddfile" .dd)
+  indb=$(echo "$indb" | perl -pe 's/\s+//g; s/\..*//; tr/[a-z]/[A-Z]/; s/[_-]//g')
+
+  cd $thisdir
+
+  ((ndbs+=1))
+  if [[ $silent -eq 0 ]] ; then
+    echo " Input database #$ndbs = $indb at '$input'" >&2
+  fi
+
+  if [[ "$meta" != "" ]] ; then
+    cd $thisdir
+    cd $input
+    for sfx in $meta
+    do
+      filein=$indb.$sfx
+      fileout=$outdb.$sfx
+      if [[ -f $filein ]] ; then
+        if [[ $sfx = iomap && $refiom -eq 4 ]] ; then
+          echo "$input/$filein" >> $output/$outdb.iomap
+        else
+          cp $filein $output/$fileout
+          chmod u+w $output/$fileout
+        fi
+      fi
+    done
+  fi # if [[ "$meta" != "" ]] ; then
+
+  if [[ $remdata -eq 0 ]] ; then
+    cd $thisdir
+    cd $input
+    typeset npools=$(head -5 $indb.dd | tail -1)
+    if [[ $copy -eq 1 ]] ; then # copying
+      if [[ $ninp -eq 1 && -d cache ]] ; then
+        eval "cp -r cache $output $sub"
+      fi
+      typeset d=1
+      while [[ $d -le $npools ]]
+      do
+        if [[ -d $d ]] ; then
+          eval "cp -r $d $output/$nglb $sub"
+        fi
+        ((d+=1))
+        ((nglb+=1))
+      done
+      $wait
+      find $output -print | xargs chmod u+w
+    else # symbolic links (the default)
+      if [[ $ninp -eq 1 && -d cache ]] ; then
+        thedir=$(\cd cache >/dev/null 2>&1; /bin/pwd 2>/dev/null || pwd)
+        ln -s $thedir $output
+      fi
+      typeset curdir=$(pwd)
+      typeset d=1
+      while [[ $d -le $npools ]]
+      do
+        if [[ -d $d ]] ; then
+          eval "ln -s $curdir/$d $output/$nglb $sub"
+        fi
+        ((d+=1))
+        ((nglb+=1))
+      done
+      $wait
+    fi
+  else
+    if [[ $silent -eq 0 ]] ; then
+      echo "***Warning: -r option given ==> only metadata will be available for output db, not the actual data" >&2
+    fi
+  fi # if [[ $remdata -eq 0 ]] ; then ... else
+
+  if [[ $refiom -eq 4 ]] ; then
+    meta="iomap"
+  else
+    meta=""
+  fi
+done # for input in $inputdirs
+
+if [[ $ninp -gt 1 ]] ; then
+# Fiddle with number of pools
+  cd $thisdir
+  cd $output
+  awk '{ if (NR == 5) { print '"$glbnpools"'; } else { print; }}' < $outdb.dd > $outdb.dd.tmp
+  \mv $outdb.dd.tmp $outdb.dd
+else
+# Copy existing dca/ dir to output dir
+  cd $thisdir
+  cd $input
+  if [[ -d dca ]] ; then
+    rm -rf $output/dca 2>/dev/null || :
+    cp -r dca $output
+    cd $thisdir
+    cd $output
+    find dca -print | xargs chmod u+w
+    dcafix -q >&2
+  fi
+fi
+
+cd $thisdir
+cd $output
+
+if [[ $dcagen -eq 1 && ! -d dca ]] ; then
+  if [[ $dcaquick -eq 0 ]] ; then 
+    if [[ $silent -eq 0 ]] ; then
+      echo "Generating direct column access -indices. This may take a while ..." >&2
+    fi
+    dcagen -F -n -z -q >&2
+  else
+    if [[ $silent -eq 0 ]] ; then
+      echo "Generating direct column access -indices using existing DCA-indices (quick)" >&2
+    fi
+    dcaquick >&2
+  fi
+fi
+create_ioassign -l $outdb -q >&2
+
+exit 0

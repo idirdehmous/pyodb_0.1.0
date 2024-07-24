@@ -1,0 +1,89 @@
+#!/bin/ksh
+#
+# Starts ODBI server(s) on one or more hosts
+#
+# Usage: odbi_start_server [-i] [-n backlog] [-p port] [-t timeout] [-v] [-b binpath] [-h hostname] [-T server_self_timeout] [hostname(s)]
+#
+# Keep args consistent with the source code odb/tools/odbi_server_main.c
+#
+# except that:
+#
+# -h hostname can be supplied multiple times
+# the arguments after optional args are interpreted as hostnames 
+#
+# Author: Sami Saarinen, ECMWF, 14-Oct-2004
+#         Sami Saarinen, ECMWF, 10-Dec-2007 : Totally revised
+#
+
+set -eu
+
+if [[ -x $ODB_BINPATH/odbi_server.x && -x $ODB_BINPATH/odbi_client.x ]] ; then
+  ulimit -c 0  # no core dumps
+  [[ ! -f core ]] || chmod u+w core
+  rm -f core
+  cat /dev/null > core
+  chmod 000 core
+
+  export ODBCS_TIMEOUT=${ODBCS_TIMEOUT:=3600}
+
+  FLAGS=h:in:p:t:vb:T:
+
+  host=""
+  ignore_child=""
+  backlog=""
+  port=$(id -u | awk '{print $1%10000 + 10000}') # default port mod(uid,10000)+10000
+  timeout=${ODBCS_TIMEOUT}
+  self_timeout=""
+  verbose=""
+  binpath=""
+
+  while getopts ${FLAGS} i
+  do
+    case $i in
+    h) host="$host$OPTARG ";;
+    i) ignore_child="-i";;
+    n) backlog="-n $OPTARG";;
+    p) port="$OPTARG";;
+    t) timeout="$OPTARG";;
+    T) self_timeout="-T $OPTARG";;
+    v) verbose="-v";;
+    b) binpath="-b $OPTARG";;
+    esac
+  done
+
+  shift $(expr $OPTIND - 1)
+
+  if [[ $# -gt 0 ]] ; then
+    host="$host$*"
+  fi
+
+  if [[ "$host" = "" ]] ; then
+    host="localhost"
+  fi
+
+  # Avoid possible gdb/dbx hangs ... ;-(
+  export GNUDEBUGGER=0
+  export DBXDEBUGGER=0
+
+  export DR_HOOK=0
+  export EC_SORTING_INFO=0
+
+  for h in $host
+  do
+    logfile=$(pwd)/log.$h.$(date +%Y%d%m_%H%M%S)
+    echo "*** Obtain ODB-server stats with ' xterm -e tail -f $logfile & '" >&2
+
+    if [[ "$h" = "localhost" ]] ; then
+      h_arg=""
+    else
+      h_arg="-h $h"
+    fi
+
+    exec $ODB_BINPATH/odbi_server.x \
+       $h_arg -p $port -t $timeout $binpath \
+       $verbose $ignore_child $backlog $self_timeout >$logfile 2>&1 &
+  done
+else
+  echo "***Error: Unable to execute ODBI-server : client/server computing maybe disabled" >&2
+  exit 1
+fi

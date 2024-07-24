@@ -1,0 +1,119 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15
+#
+# odbgzip/odbgunzip
+#
+#begingzip
+#
+# odbgzip : gzip's ODB data file(s) and preserve their file suffix
+#           check if already gzip'ped --> ignored 
+#           (note: not having the suffix .gz is not a guarantee for that!)
+#
+# odbgzip [-fv123456789] [-B bufsize] [-t] file(s)
+#
+# The default: odbgzip -1f -B 1M 
+#
+#endgzip
+#
+#begingunzip
+#
+# odbgunzip : gunzip's ODB data file(s), but only they were gzip'ped in the first place
+#             (note: not having the suffix .gz is not a guarantee for that!)
+#
+# odbgunzip [-v] [-B bufsize] [-t] file(s)
+#
+# The default: odbgunzip -B 1M 
+#
+#endgunzip
+
+set -eu
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+#=======================================================================
+
+pack=1
+echo "$(basename $0)" | grep gzip >/dev/null 2>&1 || pack=0
+
+#=======================================================================
+
+bufsize=1M
+verbose=0
+
+if [[ $pack -eq 1 ]] ; then
+  opt="-1f"
+  flags="B:ftv123456789"
+else
+  opt=""
+  flags="B:tv"
+fi
+tables=0
+
+abort=no
+while getopts $flags option
+do
+  case $option in
+    B) bufsize="$OPTARG";;
+    f) opt="${opt} -f";;
+    t) tables=1;;
+    v) opt="${opt} -v"; verbose=1;;
+    1) opt="${opt} -1";;
+    2) opt="${opt} -2";;
+    3) opt="${opt} -3";;
+    4) opt="${opt} -4";;
+    5) opt="${opt} -5";;
+    6) opt="${opt} -6";;
+    7) opt="${opt} -7";;
+    8) opt="${opt} -8";;
+    9) opt="${opt} -9";;
+    *) abort=yes;;
+  esac
+done
+
+shift $(expr $OPTIND - 1)
+
+if [[ "$abort" = "yes" ]] ; then
+  if [[ $pack -eq 1 ]] ; then
+    awk '/#begingzip/,/#endgzip/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  else
+    awk '/#begingunzip/,/#endgunzip/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  fi
+  exit 1
+fi
+
+if [[ $# -lt 1 ]] ; then # No files supplied
+  files=""
+else
+  files="$*"
+fi
+
+if [[ $tables -eq 1 ]] ; then
+  files="$files [0-9]*/*"
+fi
+
+#=======================================================================
+
+magic="037213"
+old_magic="037236"
+
+for f in $files
+do
+  if [[ -s $f ]] ; then
+    check=$(od -cv $f | head -1 | awk '{print $2$3}')
+    if [[ $pack -eq 1 ]] ; then
+      if [[ "$check" != "$magic" && "$check" != "$old_magic" ]] ; then
+        # until gzip calls setbuf() ...
+        [[ $verbose -eq 0 ]] || (echo "gzip'ing $f ... " | perl -pe 's/\n//;')
+        dd bs=$bufsize if=$f 2>/dev/null | $ODB_GZIP $opt -c | dd bs=$bufsize of=$f.gz 2>/dev/null
+        mv $f.gz $f
+      fi
+    else
+      if [[ "$check" = "$magic" ]] || [[ "$check" = "$old_magic" ]] ; then
+        # until gunzip calls setbuf() ...
+        [[ $verbose -eq 0 ]] || (echo "gunzip'ing $f ... ")
+        dd bs=$bufsize if=$f 2>/dev/null | $ODB_GUNZIP $opt -c | dd bs=$bufsize of=$f.ugz 2>/dev/null
+        mv $f.ugz $f
+      fi
+    fi
+  fi
+done

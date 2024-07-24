@@ -1,0 +1,38 @@
+#
+# Script to export ODB environment variables (csh, tcsh, etc.)
+#
+# Usage: [set ODB_ROOT=<dir>] ; source use_odb.csh
+#
+
+if ( $?ODB_ROOT == 0 ) then
+  set ODB_ROOT = "@CMAKE_INSTALL_PREFIX@"
+endif
+
+unset found_pc_file
+foreach pc_dir ( $ODB_ROOT $ODB_ROOT/lib/pkgconfig )
+  set pc_file = $pc_dir/odb.pc      
+  if ( -f $pc_file ) then
+    set found_pc_file = 1
+    break
+  endif
+end
+
+if ( $?found_pc_file == 0 ) then
+  echo "error: Could not find 'odb.pc' file in ODB_ROOT directory '$ODB_ROOT'"
+  exit 1
+else
+
+set pc_prefix = "--define-variable=prefix=$ODB_ROOT"
+
+setenv PATH "$ODB_ROOT/bin:$PATH"
+setenv ODB_INCLUDE `pkg-config $pc_file $pc_prefix --cflags`
+setenv ODB_LIB `pkg-config $pc_file $pc_prefix --static --libs`
+
+foreach line ( "`cat $pc_file`" )
+  if ( "$line" =~ "ODB*" ) then
+    set name = `echo $line | cut -d '=' -f 1`
+    setenv $name "`pkg-config $pc_file $pc_prefix --variable=$name`"
+  endif
+end
+
+endif

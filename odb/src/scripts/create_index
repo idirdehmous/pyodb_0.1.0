@@ -1,0 +1,141 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15
+set -eu
+#=======================================================================
+#begin
+#
+# create_index [-u|-b]  [-n idxname] -t table -c colname(s) [-p poolno(s)] [-l dbname] [-r ratio]
+#
+# A (development) tool to create ODB row-indices
+#
+# CREATE [UNIQUE|BITMAP] INDEX idxname ON tblname (colname(s)) PARTITION poolno
+#
+# Options:
+#
+#  -u           : unique index (the default)
+#  -b           : bitmap index
+#  -n idxname   : index name, by default table-name + timestamp (for now)
+#  -t table     : table name in concern (must be supplied)
+#  -c col(s)    : comma or blank separated list of column (must be supplied)
+#  -p poolno(s) : pool number(s) (could be a range: 1-5 or a comma separated: 1,2,3,10,11 or both)
+#  -l dbname    : database name in concern (the default figured out from existing .dd-file)
+#  -r ratio     : cardinality over no. of rows -limit percentage above which index creation is abandoned (default=10)
+#
+# Author: Sami Saarinen, ECMWF, 16-Jan-2006
+#
+#end
+#=======================================================================
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+idxtype=1 # 1=unique index, 2=bitmap index
+idxtypename=UNIQUE
+idxname=""
+table=""
+cols=""
+poolmask=""
+dbname=""
+dbdir=. # for now
+ratio=10
+
+FLAGS=bc:l:n:p:r:t:u
+
+abort=no
+while getopts ${FLAGS} i
+do
+  case $i in
+  b) idxtype=2; idxtypename=BITMAP;;
+  c) cols="$cols $OPTARG";;
+  l) dbname="$OPTARG";;
+  n) idxname="$OPTARG";;
+  p) poolmask="$poolmask $OPTARG";;
+  r) ratio="$OPTARG";;
+  t) table="$OPTARG";;
+  u) idxtype=1; idxtypename=UNIQUE;;
+  \?) abort=yes; break;;
+  esac
+done
+
+# for now : no 'cd':ing
+#cd $dbdir || exit 1
+
+ddfile=/dev/null
+if [[ "$dbname" = "" ]] ; then
+  dbname=$(basename $(ls -C1 *.dd 2>/dev/null | head -1) .dd || echo "")
+  if [[ "$dbname" = ".dd" ]] ; then
+    dbname=""
+  fi
+fi
+
+if [[ "$dbname" = "" ]] ; then
+  echo "***Error: Cannot determine database name" >&2
+  abort=yes
+else
+  ddfile=$dbname.dd
+fi
+
+if [[ "$table" = "" ]] ; then
+  echo "***Error: Table name not given" >&2
+  abort=yes
+else
+  rc=0
+  egrep "^@$table" $ddfile >/dev/null 2>&1 || rc=$?
+  if [[ $rc -ne 0 ]] ; then
+    echo "***Error: Table '$table' is not part of database schema '$dbname'" >&2
+    abort=yes
+  fi
+fi
+
+# sort columns in alphabetical order, remove commas, use blank as a separator and remove trailing space
+# so for example: "col1  col3, col2,,col4" becomes "col1 col2 col3 col4"
+cols=$(echo "$cols" | perl -pe 's/^\s*//; s/\s*$//; s/,/ /g; s/\s+/\n/g;' |\
+       sort -u | perl -pe 's/\s+/ /g' | perl -pe 's/\s+$//')
+if [[ "$cols" = "" ]] ; then
+  echo "***Error: No column name(s) specified" >&2
+  abort=yes
+fi
+
+#=======================================================================
+#   Report errors and exit
+#=======================================================================
+
+if [[ $abort = yes ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 1
+fi
+
+#=======================================================================
+#   So far all ok
+#=======================================================================
+
+#-- Show columns
+echo "==> Using columns $cols"
+
+#-- Generate index name
+if [[ "$idxname" = "" ]] ; then
+  idxname=${table}_$(echo "$cols" | cksum | awk '{print $1}')
+fi
+echo "==> Using index name '$idxname' for CREATE $idxtypename INDEX"
+
+#-- Poolmask
+if [[ "$poolmask" != "" ]] ; then
+  poolmask=$(echo $poolmask | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g')
+  export ODB_PERMANENT_POOLMASK="$poolmask"
+  echo "==> Using only pools : $ODB_PERMANENT_POOLMASK"
+fi
+
+#=======================================================================
+#   Get going (assume lib$dbname.a is already there .. for now)
+#=======================================================================
+
+obj=$($ODB_AR t $ODB_LIBPATH/libodbmain.a | grep Create_index)
+$ODB_AR xv $ODB_LIBPATH/libodbmain.a $obj
+
+odbf90 $obj -l$dbname -o create_index.x
+
+# Usage for now
+cmd="./create_index.x $dbname $idxtype $idxname $table $ratio $cols"
+echo "$cmd"
+      $cmd
+
+rm -f $obj create_index.x

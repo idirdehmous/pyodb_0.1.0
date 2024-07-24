@@ -1,0 +1,317 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15 
+#begin
+#
+# odbcompress   -i input_database_path         : location of source database (dbname figured out from .dd-file)
+#               -o output_database_path        : location of destination database
+#              [-a]                            : to append to the existing database (output_db)
+#              [-l output_db_data_layout_file] : must be provided, unless -a option is used
+#              [-f flags_file]                 : additional input for layout (same as .flags-file)
+#              [-p specific_pool_number(s)]    : select only from these *input* database pools for output database
+#              [-1]                            : use I/O-method#1 for output database (the default)
+#              [-4]                            : use I/O-method#4 for output database
+#              [-n]                            : create dca-indices with fast -n option (the default)
+#              [-u]                            : create dca-indices with (sometimes) timeconsuming -u option
+#              [-c]                            : enforce clean build (odbcomp)
+#              [-k]                            : konvert $ODB_LAT (def=lat@hdr) & $ODB_LON (def=lon@hdr) to degrees
+#              [-g odb_table_name]             : Apply odbgzip'ping for selected table(s)
+#              [-G]                            : Apply odbgzip'ping ALL available tables
+#              [-v]                            : Be more verbose when running ODB-compress
+#              [-T]                            : set ODB tracing on
+#              [-m membytes]                   : Max. mem. in bytes for ODB_get() (default=67108864 bytes or 1/10 of avail.mem.)
+#              [-H dr_hook_opt]                : Enable Dr.Hook profiler and export DR_HOOK_OPT with dr_hook_opt
+#              [-h]                            : Print this usage
+#
+#end
+#
+
+set -eu
+
+thisdir=$(pwd)
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+FLAGS=acf:g:GhH:i:kl:m:no:p:Tuv14
+
+append=0
+flagfile=""
+input_db=""
+layout=""
+output_db=""
+poolmask=""
+io_method=1
+update="-n"
+clean_build=0
+konvert=""
+gztables=""
+gzip=0
+gzall=0
+drhookopt=""
+trace=0
+verbose=""
+membytes=67108864 # 64 Mbytes
+
+hinv=$(whence hinv 2>/dev/null || echo "")
+if [[ "$hinv" != "" && -x "$hinv" ]] ; then
+  rc=0
+  $hinv 2>/dev/null | grep " Mbytes" || rc=$?
+  if [[ $rc -eq 0 ]] ; then
+    membytes=$($hinv 2>/dev/null | grep " Mbytes" | awk '{printf("%.0f\n", ($(NF-1) * 1024 * 1024)/10); }')
+  fi
+fi
+
+export ODB_LAT=${ODB_LAT:="lat@hdr"}
+export ODB_LON=${ODB_LON:="lon@hdr"}
+export ODB_LATLON_RAD=${ODB_LATLON_RAD:="latlon_rad@desc"}
+
+abort=no
+while getopts ${FLAGS} i
+do
+  case $i in
+  a)  append=1;;
+  c)  clean_build=1;;
+  f)  flagfile="$OPTARG";;
+  g)  gztables="$gztables $OPTARG"; gzip=1;;
+  G)  gzip=1; gzall=1;;
+  H)  drhookopt="$OPTARG";;
+  h)  abort=yes; break;;
+  i)  input_db="$OPTARG";;
+  k)  konvert="-k";;
+  l)  layout="$OPTARG";;
+  m)  membytes="$OPTARG";;
+  n)  update="-n";;
+  o)  output_db="$OPTARG";;
+  p)  poolmask="$poolmask $OPTARG";;
+  u)  update="-u";;
+  T)  trace=1;;
+  v)  verbose="-v";;
+  1)  io_method=1;;
+  4)  io_method=4;;
+  *)  abort=yes; break;;
+  esac
+done
+
+if [[ "$input_db" = "" ]] ; then
+  echo "***Error: Input database not given"
+  abort=yes
+fi
+
+if [[ "$output_db" = "" ]] ; then
+  echo "***Error: Output database not given"
+  abort=yes
+fi
+
+input_db_dir="$input_db"
+
+grpsize=1
+if [[ -d "$input_db_dir" ]] ; then
+  input_db_dir=$(\cd $input_db_dir 2>/dev/null; pwd)
+  input_db=$(\cd $input_db_dir 2>/dev/null; basename $(\ls -C1 *.dd 2>/dev/null | head -1) .dd || echo "")
+  if [[ "$input_db" = ".dd" ]] ; then
+    echo "***Error: Unable to locate principal metadata file from input database dir '$input_db_dir'"
+    abort=yes
+  else
+    if [[ -s $input_db_dir/$input_db.dd ]] ; then
+      grpsize=$(head -5 $input_db_dir/$input_db.dd | tail -1)
+      yyyymmddhh=$(head -4 $input_db_dir/$input_db.dd | tail -1 | awk '{printf("%8.8d%2.2d\n",$1,$2/10000);}')
+      export ODB_ANALYSIS_DATE=$(echo $yyyymmddhh | cut -c1-8)
+      export ODB_ANALYSIS_TIME="$(echo $yyyymmddhh | cut -c9-10)0000"
+    fi
+    [[ $clean_build -eq 0 ]] || \rm -f  $input_db_dir/lib$input_db.a
+    if [[ ! -f $input_db_dir/lib$input_db.a ]] ; then
+      cd $input_db_dir
+      pwd
+      odbcomp -z $input_db.sch
+      cd $thisdir
+    fi
+    if [[ ! -d $input_db_dir/dca ]] ; then
+      cd $input_db_dir
+      pwd
+      dcagen -z -F -n
+      cd $thisdir
+    fi
+  fi
+else
+  if [[ $abort = no ]] ; then
+    echo "***Warning: Unable to locate input database directory '$input_db_dir'"
+    echo "----------> ODB-compression will NOT be performed for this database"
+    exit 0
+  else
+    echo "***Error: Unable to locate input database directory '$input_db_dir'"
+    abort=yes
+  fi
+fi
+
+if [[ $append -eq 0 && "$layout" != "" && ! -f "$layout" ]] ; then
+  echo "***Error: Unable to locate given data layout file '$layout'"
+  abort=yes
+fi
+
+if [[ $append -eq 0 && "$flagfile" != "" && ! -f "$flagfile" ]] ; then
+  echo "***Error: Unable to locate given flags-file '$flagfile'"
+  abort=yes
+fi
+
+if [[ $append -eq 0 && "$layout" = "" ]] ; then
+  echo "***Error: Data layout file for the *NEW* output database must be given (unless -a is also used)"
+  abort=yes
+fi
+
+[[ $abort = no ]] || {
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 1
+}
+
+[[ $abort = no ]] || {
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 2
+}
+
+output_db_dir="$output_db"
+
+if [[ $append -eq 0 && -d "$output_db_dir" ]] ; then
+  \rm -rf $output_db_dir
+fi
+
+if [[ ! -d "$output_db_dir" ]] ; then
+  mkdir -p $output_db_dir
+  append=0
+fi
+
+if [[ $append -eq 0 ]] || [[ $clean_build -eq 1 ]] ; then
+  if [[ "$layout" != "" && -f "$layout" ]] ; then
+    output_db=$(echo "$layout" | perl -pe 's#^.*/##; s/\..*//')
+    \cp $layout $output_db_dir/$output_db.ddl
+    [[ ! -f $flagfile ]] || \cp $flagfile $output_db_dir/$output_db.flags
+    cd $output_db_dir
+    pwd
+    env ODB_CREATE_IOASSIGN=0 odbcomp $(basename $layout)
+    # re-create IOASSIGN-files, since they probably got wrong/or not created
+    if [[ -f $output_db.setup ]] ; then
+      rm -f *IOASSIGN* || :
+      chmod u+x $output_db.setup
+      ./$output_db.setup > $output_db.IOASSIGN
+      ln -s $output_db.IOASSIGN IOASSIGN.$output_db
+      ln -s $output_db.IOASSIGN IOASSIGN
+    fi
+    cd $thisdir
+  else
+    echo "***Error: Data layout file for *NEW* output database must be given"
+    abort=yes
+  fi
+fi
+
+[[ $abort = no ]] || {
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 3
+}
+
+if [[ -d "$output_db_dir" ]] ; then
+  output_db_dir=$(\cd $output_db_dir 2>/dev/null; pwd)
+  output_db=$(echo "$output_db" | perl -pe 's#^.*/##; s/\..*//')
+  if [[ $append -eq 0 ]] ; then
+    (\cd $output_db_dir 2>/dev/null; \rm -rf [0-9]*)
+  fi
+else
+  echo "***Error: Unable to locate output database directory '$output_db_dir'"
+  abort=yes
+fi
+
+[[ $abort = no ]] || {
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 4
+}
+
+#-- Poolmask
+if [[ "$poolmask" != "" ]] ; then
+  poolmask=$(echo "$poolmask" | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g')
+  export ODB_PERMANENT_POOLMASK_${input_db}="$poolmask"
+  echo "==> Using only pools these input pools : $poolmask"
+fi
+
+#-- Append arg
+
+if [[ $append -eq 0 ]] ; then
+  append_arg=""
+else
+  append_arg="-a"
+fi
+
+#-- create executable --
+
+obj=$($ODB_AR t $ODB_LIBPATH/libodbmain.a | grep Odbcompress)
+$ODB_AR x $ODB_LIBPATH/libodbmain.a $obj
+
+create_odbglue ${input_db} ${output_db}
+
+odbf90 $obj -o $thisdir/odbcompress.x \
+       -L${input_db_dir} -l${input_db} \
+       -L${output_db_dir} -l${output_db}
+
+rm -f $obj
+
+#-- setup environment --
+
+export IOASSIGN=$thisdir/tmp.IOASSIGN.$$
+cat $input_db_dir/$input_db.IOASSIGN $output_db_dir/$output_db.IOASSIGN > $IOASSIGN
+
+export ODB_IO_METHOD_${input_db}=5
+export ODB_SRCPATH_${input_db}=$input_db_dir
+export ODB_DATAPATH_${input_db}=$input_db_dir
+
+export ODB_IO_METHOD_${output_db}=$io_method
+#export ODB_IO_METHOD=$io_method   # this not required as the initialization bug in newio.c was fixed
+export ODB_IO_GRPSIZE=$grpsize
+export ODB_SRCPATH_${output_db}=$output_db_dir
+export ODB_DATAPATH_${output_db}=$output_db_dir
+
+#-- run --
+
+if [[ "$drhookopt" != "" ]] ; then
+  export DR_HOOK=true
+  export DR_HOOK_OPT="$drhookopt"
+fi
+
+if [[ $trace -eq 1 ]] ; then # turn ODB-tracing on
+  export ODB_TRACE_PROC=-1
+  export ODB_TRACE_FILE=$thisdir/trace.%d
+  export ODB_TRACE_FLUSH_FREQ=1
+fi
+
+cmd="$thisdir/odbcompress.x -i ${input_db} -o ${output_db} -m $membytes $konvert $append_arg $verbose"
+
+if [[ "$ODB_ARCH" = "nectx" ]] ; then
+  echo "$cmd" | odbqsub -N odbcmprs$$ || exit $?
+else
+  echo "$cmd"
+        $cmd || exit $?
+fi
+
+echo "Creating direct column access indices (with $update) ..."
+cd $output_db_dir
+pwd
+dcagen -z -F $update
+
+if [[ $gzip -eq 1 ]] ; then
+  cd $output_db_dir
+  ddfile=${output_db}.dd
+  npools=$(head -5 $ddfile | tail -1)
+  if [[ $gzall -eq 1 ]] ; then
+    gztables=$(egrep ^@ $ddfile | perl -ne 'print "$1\n" if (m/^\@(\S+)\s+\d+/)' | perl -pe 's/\n/ /g;')
+  fi
+
+  #-- AIX doesn't seem to support 'xargs -r', but its 'xargs' by default implies -r ...
+  xargs_r=$(echo "" | xargs -r 2>/dev/null && echo "xargs -r" || echo "xargs")
+
+  echo "odbgzip'ping table(s) $gztables ..."
+  pwd
+  for t in $gztables
+  do
+    find . -name "$t" -type f -print 2>/dev/null | $xargs_r -n$npools odbgzip -v
+  done
+fi
+
+echo "=== Size comparison: input vs. output in kilobytes:"
+du -sk $input_db_dir
+du -sk $output_db_dir
+
+\rm -f $IOASSIGN $thisdir/odbcompress.x

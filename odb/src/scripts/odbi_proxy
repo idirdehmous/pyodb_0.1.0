@@ -1,0 +1,108 @@
+#!/bin/ksh
+#
+# Usage: env [env-args] odbi_proxy [odbi_server.x-args]
+#
+# See [env-args] from source code at function odb/a*x/odbcs_wrappers.c:StartServer()
+#                                         and odb/a*x/odbcs_conf.c
+#
+
+set +eu
+
+args=${*:-}
+
+verbose=0
+for a in $args
+do
+  if [[ "$a" = "-v" ]] ; then
+    verbose=1
+    break;
+  fi
+done
+
+host=$(hostname)
+
+export ARCH=${ARCH:=$_ARCH}
+export CPU_TYPE=${CPU_TYPE:=$_CPU_TYPE}
+export OBJECT_MODE=${OBJECT_MODE:=$_OBJECT_MODE}
+export ODB_VERSION=${ODB_VERSION:=$_ODB_VERSION}
+export ODB_ARCH=${ODB_ARCH:=$_ODB_ARCH}
+
+initscr=$_ODB_ROOT/bin/use_odb.sh
+if [[ -r $initscr ]] ; then
+  export ODB_DIR=${ODB_DIR:=$_ODB_DIR}
+  export ODB_ROOT=${ODB_ROOT:=$_ODB_ROOT}
+else # ECMWF ;-(
+  initscr=${ECMWFHOME:=/usr/local/share/ecmwf}/use/sh.odb
+fi
+
+#-- ECMWF's special rumba ... hmmm ... ;-(
+
+if [[ X"${PGI:-}" = X ]] ; then # PGI-compiler root maybe missing ...
+  initscr_pgi=${ECMWFHOME:=/usr/local/share/ecmwf}/use/sh.pgi
+  if [[ -r $initscr_pgi ]] ; then
+    . $initscr_pgi >/dev/null 2>&1
+  fi
+fi
+
+hpc=$(echo "$host" | cut -c1-3)
+system=$(uname -s | cut -c1-3)
+
+if [[ "$hpc" = hpc && "$system" = "AIX" ]] ; then
+  hpcx=$(echo "$host" | cut -c1-4)
+  gid=$(id -gn)
+  uid=$(id -un)
+  export TMPDIR=/$hpcx/tmp/$gid/$uid   # ~ $TEMP on HPCs
+else
+  uid=$(id -un)
+  export TMPDIR=/tmp/tmpdir/$uid    # ~ $TRUE_TMPDIR
+fi
+
+if [[ -r $initscr ]] ; then
+  . $initscr >/dev/null 2>&1
+else
+  echo "***Error in odbi_proxy: Unable to run the initialization script '$initscr' on $host" >&2
+  exit 1
+fi
+
+set -e
+
+if [[ ! -d $TMPDIR ]] ; then
+  mkdir -p $TMPDIR 2>/dev/null || :
+  if [[ ! -d $TMPDIR ]] ; then
+    uid=$(id -un)
+    export TMPDIR=/tmp/$uid
+    mkdir -p $TMPDIR 2>/dev/null || :
+  fi
+  if [[ ! -d $TMPDIR ]] ; then
+    export TMPDIR=/tmp
+  fi
+fi
+
+\cd $TMPDIR >/dev/null 2>&1 || :
+
+ulimit -c 0  # no core dumps
+ulimit -s unlimited 2>/dev/null >&2 || :
+
+if [[ $verbose -eq 1 ]] ; then
+  ulimit -a >&2 || :
+fi
+
+# Avoid possible gdb/dbx hangs ... ;-(
+export GNUDEBUGGER=0
+export DBXDEBUGGER=0
+
+export DR_HOOK=0
+export EC_SORTING_INFO=0
+
+if [[ -x $ODB_BINPATH/odbi_server.x ]] ; then
+  if [[ $verbose -eq 1 ]] ; then
+    exec $ODB_BINPATH/odbi_server.x $args >&2 &
+  else
+    exec $ODB_BINPATH/odbi_server.x $args >/dev/null 2>&1 &
+  fi
+else
+  echo "***Error in odbi_proxy: Unable to start the ODB-server '$ODB_BINPATH/odbi_server.x' on $host" >&2
+  exit 2
+fi
+
+exit 0

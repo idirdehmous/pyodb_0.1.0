@@ -1,0 +1,70 @@
+#!/bin/ksh
+#
+# A script to re-create DDL-file from data
+#
+# Usage: dd2ddl database_name
+#
+# For example: dd2ddl ECMA
+#
+# Author: Sami Saarinen, ECMWF, 16-Oct-2000
+#
+
+#
+# Check for SET-variable presence
+#
+# A bug prior to CY23R3/4: $-variables did not
+# enter into the DD-file at all; have to be gotten
+# from $ODB_SYSPATH/<database>.ddl_ (if exists)
+#
+
+if [[ $# -ne 1 ]] ; then
+  echo "***Error: Invalid number of arguments"
+  echo "Usage: dd2ddl database_name"
+  exit 1
+fi
+
+db=$(basename $1 | perl -pe 's/^(.*)\..*/\U$1/')
+ddl_dir=$(dirname $1)
+ddfile=$ddl_dir/$db.dd
+ddl_file=$db.sch
+
+if [[ ! -f $ddfile ]] ; then
+  echo "***Error: DD-file '$ddfile' not found"
+  exit 2
+fi
+
+egrep '^\$' $ddfile > /dev/null 2>&1
+
+if [[ $? -eq 1 ]] ; then
+  usd_found=0
+else
+  usd_found=1
+fi
+
+repeat=0
+while [[ $repeat -le 1 ]]
+do
+# Grab the default (if any) SET-variables
+  if [[ $usd_found -eq 0 && -f $ODB_SYSPATH/$db.ddl_ ]] ; then
+    egrep ^SET $ODB_SYSPATH/$db.ddl_ > $ddl_file
+  else
+    cat /dev/null > $ddl_file
+  fi
+
+# Translate : .dd -> .ddl (or .sch, rather)
+  echo "Creating '$ddl_file' ..."
+  $ODB_FEBINPATH/dd2ddl.x < $ddfile >> $ddl_file
+
+# Check if any SET-variables present; if not, then redo once
+# with usd_found=0
+
+  egrep ^SET $ddl_file >/dev/null 2>&1
+  if [[ $? -eq 0 ]] ; then
+    repeat=2
+  else
+    repeat=$((repeat + 1))
+    usd_found=0
+  fi
+done
+
+exit 0

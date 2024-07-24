@@ -1,0 +1,74 @@
+#!/bin/csh -f
+#
+# A script to re-generate shareable object for a given layout.
+#
+# Assumes that ODB_LIBPATH is already defined.
+#
+# Objects are created into the current directory.
+#
+# Usage: odblink DATABASE_NAME
+#
+# Author: Sami Saarinen, ECMWF, 1998-99
+#
+
+if ( $#argv != 1 ) then
+  echo "Usage: odblink DATABASE_NAME"
+  exit 1
+endif
+
+set dbname=$1
+
+set rc=0
+if ( $?ODB_LIBPATH == 0) then
+  echo "*** Error: ODB_LIBPATH must be defined"
+  @ rc++
+endif
+
+if ( ! -f $ODB_LIBPATH/lib${dbname}.a ) then
+  echo "*** Error: No such library file '$ODB_LIBPATH/lib${dbname}.a'"
+  @ rc++
+endif
+
+if ( $rc > 0 ) exit $rc
+
+set this=`pwd`
+
+if ( $?SCRATCHDIR != 0 ) then
+  set tmpdir=$SCRATCHDIR
+else if ( $?SCRATCH != 0 ) then
+  set tmpdir=$SCRATCH
+else if ( $?TMPDIR != 0 ) then
+  set tmpdir=$TMPDIR
+else
+  set tmpdir=/tmp
+endif
+
+set tmpdir=$tmpdir/tmp.$$
+mkdir -p $tmpdir || exit 3
+cd $tmpdir
+
+echo Extracting TABLE-specific object files from \$ODB_LIBPATH/lib${dbname}.a ...
+ar  x $ODB_LIBPATH/lib${dbname}.a
+#rm -f ${dbname}_*.o
+cp $this/${dbname}.o     || :
+cp $this/${dbname}_T_*.o || :
+set sofile=$this/${dbname}.so
+
+rm -f $sofile
+
+set rc=0
+echo ${ODB_LD} ${dbname}.o ${dbname}_T_*.o ${ODB_LIBS} -o $sofile
+     ${ODB_LD} ${dbname}.o ${dbname}_T_*.o ${ODB_LIBS} -o $sofile || set rc=$status
+
+cd $this
+rm -rf $tmpdir
+
+if ( $rc != 0 ) then
+  rm -f $sofile
+  echo "*** Error: Shareable object '$sofile' creation failed"
+else
+  set sofile=`basename $sofile`
+  ls -l $sofile    
+endif
+
+exit $rc

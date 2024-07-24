@@ -1,0 +1,104 @@
+#!/bin/ksh
+#begin
+#
+# Stop odbi_server.x's started by the username
+#
+# Usage: odbi_stop_server [-9] [-u username] [-x server_exe] [-p process_id] [-h hostname] [hostname(s)]
+#
+# Note:  -p process_id can be supplied multiple times AND applies to ALL hosts given
+#
+# Note:  -h hostname can be supplied multiple times to kill servers on many hosts e.g.:
+#
+#        -h hpce -h bee04 -h ecgate
+#
+#        or as last args :
+#
+#        hpce bee04 ecgate
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 02-May-2007
+#
+
+set -eu
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+export USER=${USER:=$(id -un)}
+user=$USER
+exe=odbi_server.x
+pids=""
+nine=""
+host=""
+
+FLAGS=p:x:u:9h:
+
+abort=no
+
+while getopts ${FLAGS} i
+do
+  case $i in
+	p)	pids="$pids$OPTARG ";;
+	x)	exe="$OPTARG";;
+	u)	user="$OPTARG";;
+	9)	nine="-9";;
+	h)	host="$host$OPTARG ";;
+	*) 	abort=yes; break;;
+	\?)     abort=yes; break;;
+  esac
+done
+
+shift $(expr $OPTIND - 1)
+
+if [[ $# -gt 0 ]] ; then
+  host="$host$*"
+fi
+
+#-- Abort, if necessary
+
+if [[ $abort = yes ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 1
+fi
+
+if [[ "$host" = "" ]] ; then
+  host="localhost"
+fi
+
+for h in $host
+do
+  if [[ "$h" = "localhost" ]] ; then
+    prefix=""
+  else
+    prefix="/usr/bin/rsh $h"
+  fi
+
+  if [[ "$pids" = "" ]] ; then
+    all=1
+  else
+    all=0
+  fi
+
+  pid_list=$($prefix ps -fu $user | fgrep "$exe" | fgrep -v grep | awk '{print $2}')
+
+  if [[ "$pid_list" != "" ]] ; then
+    if [[ $all -eq 1 ]] ; then
+      kill_list=$pid_list
+    else
+      kill_list=""
+      for p in $pids
+      do
+        for tp in $pid_list
+        do
+          [[ $tp -ne $p ]] || kill_list="$kill_list$p "
+        done
+      done
+    fi
+
+    if [[ "$kill_list" != "" ]] ; then
+      $prefix kill $nine $kill_list 2>/dev/null || :
+    fi
+  fi
+done
+
+exit 0

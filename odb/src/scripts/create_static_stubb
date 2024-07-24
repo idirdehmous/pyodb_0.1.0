@@ -1,0 +1,165 @@
+#!/bin/ksh
+#
+# Generates database specific static stubb file from
+# the given SQL filenames
+#
+# Usage: create_static_stubb [-c|-v] database_name [sql_files]
+#
+# Output file is called : <database_name>_Sstatic.c
+#
+# If -c option is used (MUST BE the first arg), 
+#    then the created C-code will be compiled with $ODB_CC (if ODB_CC is defined)
+#    If compilation successful, then the object will be put into lib<dbname>.a (if available)
+# If -v option is used (MUST BE the first arg),
+#    then the viewnames associated (found) in the given SQL-file are written to stdout
+#
+
+set -eu
+
+usage="Usage: $0 [-c|-v] database_name [sql_files]"
+
+if [[ $# -lt 1 ]] ; then
+  echo "$usage" >&2
+  exit 1
+fi
+
+compile=0
+vn=0
+
+if [[ "$1" = "-c" ]] ; then
+  compile=1
+  shift
+elif [[ "$1" = "-v" ]] ; then
+  vn=1
+  shift
+fi
+
+if [[ $# -lt 1 ]] ; then
+  echo "$usage" >&2
+  exit 2
+fi
+
+db=$1
+shift
+
+if [[ $# -ge 1 ]] ; then
+  sql_files=$*
+else
+  sql_files=$(\ls [a-z]*.sql 2>/dev/null || :)
+fi
+
+if [[ $compile -eq 1 ]] ; then
+  stubb_file=${db}_Sstatic.c
+else
+  stubb_file=${db}_Sstatic.c.new
+fi
+stubb_obj=${db}_Sstatic.o
+stubb_tmp=${db}_Sstatic.c.tmp
+
+cat > $stubb_file <<EOF
+#define ODB_GENCODE 0
+#include "${db}.h"
+
+PUBLIC void ${db}_static_init() {
+ODB_ANCHOR(${db});
+EOF
+
+export ODB_AR=${ODB_AR:="ar"}
+
+libname=lib$db.a
+testvar=ODB_SRCPATH_${db}
+set +u
+testvalue=$(eval echo \$$testvar 2>/dev/null || :)
+if [[ "$testvalue" != "" && -d "$testvalue" ]] ; then
+  libname=$testvalue/lib$db.a
+else
+  testvalue=""
+fi
+set -u
+
+#-- Preserve pre-existing views from previous compilation(s) (except if -v given)
+cat /dev/null > $stubb_tmp
+if [[ $vn -eq 0 && -r $libname ]] ; then
+  $ODB_AR t $libname | perl -pe "s/^${db}_//; s/[.]o//;" |\
+                       egrep -v "^(T_|Sstatic|${db})" > $stubb_tmp
+fi
+
+set +u
+for sql in $sql_files
+do
+  if [[ -r "$sql" && "$sql" != "/dev/null" ]] ; then
+#    s=$(basename $sql .sql)
+#    set -A v $(\cat $sql | perl -ne 'print "\L$1 " if (/CREATE\s+VIEW\s+(\w+)/i);')
+    set -A v $(perl -ne 'print "\L$1\n" if(/^\s*CREATE\s*VIEW\s+(\S+)/i);' $sql |\
+               perl -pe 's/(\w+)\s*\[\s*(-?\d+)\s*\].*/$1_$2/; s/-/_/g;')
+#    echo "v=${v[*]}"
+#    echo "no. of v=${#v[*]}"
+    if [[ ${#v[*]} -gt 0 ]] ; then
+      for s in ${v[*]}
+      do
+        echo "$s" >> $stubb_tmp
+      done
+    else # Probably a direct select ... from ... ?
+      s=$(basename $sql .sql | perl -pe 'tr/A-Z/a-z/')
+      echo "ODB_ANCHOR_VIEW(${db}, $s );" >> $stubb_file
+      # count number of selects. if more than 1, make also views _tmp_1, _tmp_2, etc.
+      n=$(\cat $sql | perl -ne 'BEGIN {$n=0} $n++ if (m/^.*\bselect\b.*/i); END {print $n}')
+      if [[ $n -gt 1 ]] ; then
+        j=1;
+        while [[ $j -lt $n ]] # < $n, since first view is already per .sql-file basename
+        do
+          echo "_tmp_$j" >> $stubb_tmp
+          ((j += 1))
+        done
+      fi
+    fi
+  fi
+done
+set -u
+
+for s in $(sort -u $stubb_tmp)
+do
+  echo "ODB_ANCHOR_VIEW(${db}, $s );" >> $stubb_file
+done
+\rm -f $stubb_tmp
+
+echo '}' >> $stubb_file
+
+rc=0
+
+if [[ $compile -eq 1 ]] ; then
+  export ODB_CC=${ODB_CC:=""}
+  libname=lib$db.a
+  if [[ "$ODB_CC" != "" ]] ; then
+    if [[ "$testvalue" != "" ]] ; then
+      export ODB_CC="${ODB_CC:=cc} -I$testvalue"
+    fi
+    echo "$ODB_CC -c $stubb_file" >&2
+          $ODB_CC -c $stubb_file  >&2 || rc=$?
+    if [[ $rc -eq 0 && -f $stubb_obj && -f $libname ]] ; then
+      $ODB_AR r $libname $stubb_obj || rc=$?
+    fi
+  fi
+elif [[ $vn -eq 1 ]] ; then
+  egrep ODB_ANCHOR_VIEW $stubb_file >/dev/null 2>&1 || rc=$?
+  egrep ODB_ANCHOR_VIEW $stubb_file 2>/dev/null | awk '{print $2}'
+  \rm -f $stubb_file  
+else # Create the final stubb-file only if it
+     # (1) does not exist already or
+     # (2) new differs from the existing one
+  rename=0
+  true_stubb_file=${db}_Sstatic.c
+  if [[ -f $true_stubb_file ]] ; then
+    diff -q $true_stubb_file $stubb_file >/dev/null 2>&1 || rename=1
+  else
+    rename=1
+  fi
+  if [[ $rename -eq 1 ]] ; then
+    \rm -f $true_stubb_file
+    \mv $stubb_file $true_stubb_file
+  else
+    \rm -f $stubb_file
+  fi
+fi
+
+exit $rc

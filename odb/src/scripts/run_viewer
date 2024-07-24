@@ -1,0 +1,127 @@
+#!/bin/csh -f
+
+if ( $#argv < 3 || $#argv > 4 ) then
+  echo "Usage: $0 dbname qualifier dbdir [viewname]"
+  exit 1
+endif
+
+unlimit
+limit core 0
+
+setenv PWD `pwd`
+
+set this=$PWD
+
+set dbname=$1
+set qualinp=$2
+set qual=${dbname}_$2
+set dbdir=$3
+
+if ( ! -d $dbdir ) then
+  echo "*** Error: Database directory '$dbdir' not found"
+  exit 1
+endif
+
+if ( $#argv == 4 ) then
+  set viewname=$4
+else
+  set viewname=
+endif
+
+set slash2dot=`echo $dbdir | sed 's%/%\.%g'`
+set outdir=$SCRATCH/My_ODB_Views/db$slash2dot
+
+if ( ! -d $outdir ) then
+  mkdir -p $outdir
+endif
+
+cd $outdir
+pwd
+
+#setenv ODB_LIBS "/home/rd/mps/src/odb/lib/libodb_sgimips.a -L/home/rd/mps/lib/SGIN32/19r1 -lnewcmaio -lioassign -lpcma -lutil"
+
+setenv ODB_SRCPATH_$dbname  $outdir
+setenv ODB_SRCPATH          $outdir
+setenv ODB_DATAPATH_$dbname $dbdir
+#setenv ODB_COMPILER "/home/rd/mps/src/odb/compiler/odb98_sgimips.x -Vd -O0"
+setenv ODB_COMPILER "/home/rd/mps/src/odb/compiler/odb98_sgimips.x -Vd"
+#setenv ODB_COMPILER "dbx /home/rd/mps/src/odb/compiler/odb98_sgimips.x -Vd"
+setenv ODB_SYSPATH  /home/rd/mps/src/odb/include
+
+if ( $?ODB_EDITOR == 0 ) setenv ODB_EDITOR    emacs
+#setenv ODB_REPORTER  /home/rd/mps/bin/b2
+setenv ODB_REPORTER  /home/rd/mps/bin/b3
+#setenv ODB_REPORTER  /home/rd/mps/src/X-Designer/xt/b3
+setenv ODB_PLOTTER   /home/rd/mps/bin/plotobs.x
+
+setenv ODB_SETUP_FILE /dev/null
+
+set setup_found=0
+if ( -f $dbdir/$dbname.setup ) then
+  ln -s $dbdir/$dbname.setup .
+  set setup_found=1
+else if ( -f $ODB_SYSPATH/$dbname.setup ) then
+  ln -s $ODB_SYSPATH/$dbname.setup .
+  set setup_found=1
+endif
+
+if ( $setup_found == 1) then
+  setenv IOASSIGN $outdir/IOASSIGN
+  if ( -f $IOASSIGN ) then
+    rm -f $IOASSIGN
+  endif
+  source $dbname.setup
+else if ( -f $ODB_SYSPATH/IOASSIGN.$qual ) then
+  setenv IOASSIGN $ODB_SYSPATH/IOASSIGN.$qual
+else
+  echo "*** Error: Setup file and/or qualified IOASSIGN-file not present"
+  exit 2
+endif
+
+#unsetenv ODB_LIBS
+printenv | grep ODB_
+cat $IOASSIGN
+
+foreach f ( `ls` )
+  if ( -l $f ) then
+    rm -f $f
+  endif
+end
+#ln -s $dbdir/* .
+
+if ( -f $dbdir/$dbname.dd ) ln -s $dbdir/$dbname.dd .
+ln -s $dbdir/$dbname.so .
+ln -s $dbdir/$dbname.ddl_ .
+ln -s $dbdir/${dbname}_H.h .
+
+unlimit
+limit core 0
+
+set abort=0
+if ( $?MPE_NPROC == 0 ) then
+  set nproc=1
+else
+  set nproc=$MPE_NPROC
+endif
+
+if ( $nproc == 1 ) then
+  set viewer=/home/rd/mps/src/odb/tools/viewer.1.x
+#  set viewer=/home/rd/mps/src/odb/tools/viewer.1.x.pure
+#--
+#   echo "$viewer $dbname $outdir ' ' $viewname"
+#   dbx  
+$viewer $dbname $outdir ' ' $viewname || set abort=1
+#--
+else
+  set viewer=/home/rd/mps/src/odb/tools/viewer.x
+  mpirun -np $nproc $viewer $dbname $outdir $PATH $viewname || set abort=1
+endif
+
+if ( $abort == 1 ) then
+  cd $this
+  pwd
+  echo "$outdir/RecoverY"
+  exec $0 $dbname $qualinp $dbdir `cat $outdir/RecoverY`
+endif
+
+exit 0

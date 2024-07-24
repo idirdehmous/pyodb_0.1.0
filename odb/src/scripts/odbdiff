@@ -1,0 +1,339 @@
+#!/bin/ksh
+set +xv
+#begin
+#
+# odbdiff -c                # Enforce recompilations
+#         -v sqlfile        # SQL-file (with or w/o prefix .sql) or a table, if starts with '@'
+#                             If SQL-file, an editor will be opened (unless -e pipe or -e batch)
+#         -e editor_name    # Preferred editor name (use pipe or batch, if no editor)
+#                             As in odbviewer, the default being $ODB_EDITOR
+#         -q 'query_string' # Data query itself : no editor will be opened
+#         -n maxdiffs       # Max. number of diffs allowed before bailing out (default=2147483647)
+#         -g                # Do *NOT* generate diff.database REFCMP i.e.
+#                             input files for simulobs2odb & create database REFCMP & run odbviewer
+#         -C _color         # Name of the "color" column for diff database (default=_color)
+#         -l label          # Label for this job to separate multiple diff DBs (default=default)
+#         -1                # Enforce (lat,lon)-conversion to degrees for reference database (DB#1)
+#         -2                # Enforce (lat,lon)-conversion to degrees for comparison database (DB#2)
+#         -b nbits          # How many last bits to ignore after (lat,lon)-conversion (default=0 i.e. none)
+#         -p poolmask       # List of pools to search. Can appear multiple times. As in odbviewer
+#         -s                # Right-adjust string-datatype before comparison (by default NOT adjusted)
+#         -R                # Do NOT convert (lat,lon) into degrees in odbviewer
+#         -r                # Convert (lat,lon) into degrees in odbviewer only in the plot, but not in textual report
+#         -k                # Convert (lat,lon) into degrees in odbviewer for both plot & report (the default)
+#         -m                # Use less memory by reading reference database pool-by-pool (default uses more memory)
+#         -i                # Latitude band increment (default=180)
+#         reference_database_dir compare_database_dir
+#
+# Author: Sami Saarinen, ECMWF, 27-Jun-2005 .. 11-Jul-2005
+#
+#end
+#
+#
+
+set -eu
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+thisdir=$(pwd)
+cd $thisdir
+export WDIR=${WDIR:=$thisdir}
+
+maxdiffs=2147483647
+recomp=0
+query=""
+query_given=0
+defview=myview
+viewname=$defview
+hassql=1
+simulobs=1
+color="_color"
+label=default
+rad2deg_1=0
+rad2deg_2=0
+rad2deg_flag="-k" # for odbviewer : convert (lat,lon) radians to degrees in plot & textual report
+nbits=0
+poolmask=""
+adjustr=0
+editor=${ODB_EDITOR:=emacs}
+memopt=0
+rlatinc=180
+rlatinc_given=0
+
+abort=no
+FLAGS=b:cC:e:gi:kl:mn:p:q:Rrsv:12
+
+abort=no
+while getopts ${FLAGS} i
+do
+  case $i in
+  b)	nbits="$OPTARG";;
+  c)	recomp=1;;
+  C)	color="$OPTARG";;
+  e)	editor="$OPTARG";;
+  g)	simulobs=0;;
+  i)	rlatinc="$OPTARG" ; rlatinc_given=1;;
+  k)	rad2deg_flag="-k" ;;
+  l)	label="$OPTARG";;
+  m)	memopt=1;;
+  n)	maxdiffs="$OPTARG";;
+  p)	poolmask="$poolmask $OPTARG";;
+  q)	query_given=1; query="$OPTARG";;
+  r)	rad2deg_flag="-r" ;;
+  R)	rad2deg_flag="-R" ;;
+  s)	adjustr=1;;
+  v)	viewname="$OPTARG";;
+  1)	rad2deg_1=1 ; rad2deg_flag="-R" ;; # -R for odbviewer : (lat,lon) assumed in degrees at REFCMP-database
+  2)	rad2deg_2=1 ; rad2deg_flag="-R" ;; # -R for odbviewer : (lat,lon) assumed in degrees at REFCMP-database
+  \?)   abort=yes; break;;
+  esac
+done
+
+shift $(expr $OPTIND - 1)
+
+if [[ $# -ne 2 || "$abort" = "yes" ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 1
+fi
+
+refpath=$1
+cmppath=$2
+
+is_table=$(echo "$viewname" | perl -ne 'if (m/^\@/) {print 1;} else {print 0;}')
+
+if [[ $is_table -eq 1 && $query_given -eq 0 ]] ; then
+  hassql=0
+  sqlfile=/dev/null
+elif [[ $query_given -eq 1 ]] ; then
+  viewname=$(echo "$viewname" | perl -pe 's/\..*//')
+  sqlfile=$viewname.sql
+  echo "$query" > $sqlfile
+elif [[ -f $viewname ]] ; then
+  sqlfile=$viewname
+  query_given=2
+else
+  sqlfile=$viewname
+  suffix=$(echo "$viewname" | perl -ne 'print $1 if (/.*(\.\w+)/);')
+  if [[ "$suffix" = ".so" && $recomp -eq 0 && $rlatinc_given -eq 0 ]] ; then
+    hassql=0
+    query_given=1
+  else
+    query_given=2
+  fi
+  viewname=$(echo "$viewname" | perl -pe 's/\..*//')
+  sqlfile=$viewname.sql
+fi
+
+sqldir=$(dirname $sqlfile)
+sqlfile=$(basename $sqlfile)
+sqldir=$(\cd $sqldir >/dev/null 2>&1 ; pwd)
+
+if [[ $query_given -eq 2 ]] ; then
+  if [[ "$editor" != pipe && "$editor" != batch ]] ; then
+    $editor $sqldir/$sqlfile &
+  fi
+fi
+
+refpath=$(\cd $refpath >/dev/null 2>&1 ; pwd)
+cmppath=$(\cd $cmppath >/dev/null 2>&1 ; pwd)
+
+REF=$thisdir/REF.$label
+CMP=$thisdir/CMP.$label
+REFCMP=REFCMP.$label
+
+cd $thisdir
+out=out$$
+
+if [[ $recomp -eq 1 ]] || \
+   [[ ! -d $REF ]] || [[ ! -d $CMP ]] ; then # Recompile layout AND SQL
+  cd $thisdir
+  odbdup -i $refpath -o $REF -l REF -F -D
+  cd $REF
+  if [[ ! -d dca ]] ; then
+    dcagen -F -n -z >$thisdir/1.$out 2>&1 &
+  fi
+  newodb -z REF >$thisdir/2.$out 2>&1 &
+
+  cd $thisdir
+  odbdup -i $cmppath -o $CMP -l CMP -F -D
+  cd $CMP
+  if [[ ! -d dca ]] ; then
+    dcagen -F -n -z >$thisdir/3.$out 2>&1 &
+  fi
+  newodb -z CMP >$thisdir/4.$out 2>&1 &
+  echo "*** Waiting for subprocesses to finish ..."
+  wait
+  for n in 1 2 3 4
+  do
+    if [[ -f $thisdir/$n.$out ]] ; then
+      cat $thisdir/$n.$out
+      rm -f $thisdir/$n.$out
+    fi
+  done
+fi
+
+wait
+
+if [[ $hassql -eq 1 ]] ; then # Recompile SQL
+  if [[ $rlatinc_given -eq 1 ]] ; then
+    where_fiddle=1
+    egrep -i '(lat|hdr)' $sqldir/$sqlfile >/dev/null 2>&1 || where_fiddle=0
+  else
+    where_fiddle=0
+  fi
+
+  cd $REF
+  if [[ $where_fiddle -eq 1 ]] ; then
+    if [[ $rad2deg_1 -eq 1 ]] ; then # Latitude already assumed in degrees
+       env ODB_WHERE_FIDDLE='$lat1 < lat <= $lat2' \
+           perl -w $ODB_BINPATH/where_fiddle.pl < $sqldir/$sqlfile > $sqlfile
+    else
+       env ODB_WHERE_FIDDLE='$lat1 < degrees(lat) <= $lat2' \
+           perl -w $ODB_BINPATH/where_fiddle.pl < $sqldir/$sqlfile > $sqlfile
+    fi
+  else
+    cat < $sqldir/$sqlfile > $sqlfile
+  fi
+  echo "*** The following SQL is in concern (database=REF at $(pwd)):"
+  cat $sqlfile
+  echo " "
+  odbcomp -z -lREF $sqlfile
+
+  cd $CMP
+  if [[ $where_fiddle -eq 1 ]] ; then
+    if [[ $rad2deg_2 -eq 1 ]] ; then # Latitude already assumed in degrees
+       env ODB_WHERE_FIDDLE='$lat1 < lat <= $lat2' \
+           perl -w $ODB_BINPATH/where_fiddle.pl < $sqldir/$sqlfile > $sqlfile
+    else
+       env ODB_WHERE_FIDDLE='$lat1 < degrees(lat) <= $lat2' \
+           perl -w $ODB_BINPATH/where_fiddle.pl < $sqldir/$sqlfile > $sqlfile
+    fi
+  else
+    cat < $sqldir/$sqlfile > $sqlfile
+  fi
+  echo "*** The following SQL is in concern (database=CMP at $(pwd)):"
+  cat $sqlfile
+  echo " "
+  odbcomp -z -lCMP $sqlfile
+else
+  echo "*** The following TABLE is in concern: $viewname"
+fi
+
+cd $thisdir
+create_odbglue REF CMP
+
+export ODB_DATAPATH_REF=$REF
+export ODB_SRCPATH_REF=$ODB_DATAPATH_REF
+export ODB_DATAPATH_CMP=$CMP
+export ODB_SRCPATH_CMP=$ODB_DATAPATH_CMP
+
+export IOASSIGN=$thisdir/IOASSIGN_$label
+cat $ODB_SRCPATH_REF/REF.IOASSIGN $ODB_SRCPATH_CMP/CMP.IOASSIGN > $IOASSIGN
+
+export ODB_READONLY=1
+export ODB_IO_METHOD=5
+
+obj=$($ODB_AR t $ODB_LIBPATH/libodbmain.a | grep Odbdiff)
+$ODB_AR x $ODB_LIBPATH/libodbmain.a $obj
+
+odbf90 $obj -o odbdiff.x -L$ODB_DATAPATH_REF -lREF -L$ODB_DATAPATH_CMP -lCMP
+
+if [[ $simulobs -eq 1 ]] ; then
+  simulobs_file2="only_in_cmp.txt.$label"
+  simulobs_file1="only_in_ref.txt.$label"
+  cat > $simulobs_file1 <<'EOF'
+#refcmp
+#/poolno=1
+#/end
+# These data rows were only found from REFERENCE database and/or are different from COMPARISON database
+EOF
+  cat > $simulobs_file2 <<'EOF'
+#refcmp
+#/poolno=2
+#/end
+# These data rows were only found from COMPARISON database and/or are different from REFERENCE database
+EOF
+else
+  simulobs_file1="/dev/null"
+  simulobs_file2="/dev/null"
+fi
+
+if [[ $hassql -eq 1 ]] ; then
+  view=$(echo "$sqlfile" | perl -pe 's/\..*//')
+else
+  view=$viewname
+fi
+
+#-- Poolmask
+if [[ "$poolmask" != "" ]] ; then
+  poolmask=$(echo $poolmask | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g')
+  export ODB_PERMANENT_POOLMASK_REF="$poolmask"
+  export ODB_PERMANENT_POOLMASK_CMP="$poolmask"
+  echo "==> Scanning only pools : $poolmask"
+fi
+
+#-- Remove gprof output (if any)
+rm -f gmon.out*
+
+./odbdiff.x CMP REF $view $maxdiffs $simulobs_file1 $color 1 $rad2deg_2 $rad2deg_1 $nbits $adjustr $memopt $rlatinc
+if [[ -f gmon.out ]] ; then
+  mv gmon.out gmon.out.CMPvsREF
+fi
+./odbdiff.x REF CMP $view $maxdiffs $simulobs_file2 $color 2 $rad2deg_1 $rad2deg_2 $nbits $adjustr $memopt $rlatinc
+if [[ -f gmon.out ]] ; then
+  mv gmon.out gmon.out.REFvsCMP
+fi
+
+#-- Disable gprof'fing (if it was on)
+export ODB_GPROF=""
+
+if [[ $simulobs -eq 1 ]] ; then
+  # Pool#1 contains REF vs. CMP database diffs
+  # Pool#2 contains CMP vs. REF database diffs
+  # "color" is set to 1 in pool#1 and 2 in pool#2
+  ndiffs1=$(tail -1 $simulobs_file1 | awk '{print $NF}')
+  ndiffs2=$(tail -1 $simulobs_file2 | awk '{print $NF}')
+  if [[ $ndiffs1 -gt 0 ]] || [[ $ndiffs2 -gt 0 ]] ; then
+    export ODB_IO_METHOD=1 # Better than 4 in case of low memory system, and since cannot be 5
+    cd $thisdir
+    simulobs2odb -l $REFCMP -i $simulobs_file1 -i $simulobs_file2 -n 2 -c
+    montage=$(whence montage 2>/dev/null || echo "")
+    xdiff=$(whence xdiff 2>/dev/null || echo "")
+    cd $REFCMP
+    export ODB_REPORTER="head -10" # Just to avoid opening b4.x-window ;-)
+    has_lat=$(grep ' lat_hdr ' REFCMP.sch >/dev/null 2>&1 || echo "no")
+    has_lon=$(grep ' lon_hdr ' REFCMP.sch >/dev/null 2>&1 || echo "no")
+    if [[ "$has_lat" = no ]] || [[ "$has_lon" = no ]] ; then
+      export ODB_PLOTTER=0 # Plotting off; no (lat,lon)-coordinates
+    else
+      export ODB_VIEWER_LAT="lat_hdr@refcmp"
+      export ODB_VIEWER_LON="lon_hdr@refcmp"
+      export ODB_VIEWER_TEXT_3="Only in DB = $refpath"
+    fi
+    odbviewer -F $rad2deg_flag -v data_only_in_ref_db \
+              -p 1 -q "select '!/:${color}@/' from refcmp orderby *" -e batch -I < /dev/null
+    export ODB_VIEWER_TEXT_3="Only in DB = $cmppath"
+    odbviewer -F $rad2deg_flag -v data_only_in_cmp_db \
+              -p 2 -q "select '!/:${color}@/' from refcmp orderby *" -e batch -I < /dev/null
+    ls -ltr data_only_in_ref_db.rpt data_only_in_ref_db.jpg || :
+    ls -ltr data_only_in_cmp_db.rpt data_only_in_cmp_db.jpg || :
+    if [[ -x "$montage" && -f data_only_in_ref_db.jpg && -f data_only_in_cmp_db.jpg ]] ; then
+      $montage -tile 2x1 -geometry 600x600 data_only_in_ref_db.jpg data_only_in_cmp_db.jpg montage.jpg
+      xv montage.jpg &
+    fi
+    if [[ -x "$xdiff" && -f data_only_in_ref_db.rpt && -f data_only_in_cmp_db.rpt ]] ; then
+      $xdiff data_only_in_ref_db.rpt data_only_in_cmp_db.rpt &
+    fi
+    echo ">>> Databases differ against the given query/table"
+    echo ">>> There are $ndiffs1 rows which are ONLY found in reference database ($refpath)"
+    echo ">>> There are $ndiffs2 rows which are ONLY found in comparison database ($cmppath)"
+    echo ">>> Difference database is found under $thisdir/$REFCMP"
+    echo ">>> Data in pool#1 denotes the rows found only in reference database"
+    echo ">>> Data in pool#2 denotes the rows found only in comparison database"
+  else
+    echo ">>> Databases are considered similar against the given query/table"
+    rm -rf $REFCMP
+  fi
+fi
+
+exit 0

@@ -1,0 +1,84 @@
+#!/bin/ksh
+#
+#begin
+#
+#  check_links [/path/][dbname.dd]
+#
+#  A rudimentary tool to check @LINK consistency
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 25-Nov-2006
+#
+
+set -eu
+
+thisdir=$(pwd)
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+abort=no
+
+dbpath=$thisdir
+dbname=""
+
+if [[ $# -ge 1 ]] ; then
+  dbpath=$1
+  if [[ -f $dbpath ]] ; then
+    dbpath=$(dirname $dbpath)
+  fi
+fi
+
+if [[ -d "$dbpath" ]] ; then
+  \cd $dbpath
+  dbpath=$(pwd)
+  dbname=$(basename $(\ls -C1 *.dd 2>/dev/null | head -1) .dd || echo "")
+  if [[ "$dbname" = ".dd" ]] ; then
+    echo "***Error: Unable to locate the main metadata file (.dd) from directory '$dbpath'" >&2
+    dbname=""
+    abort=yes
+  fi
+  \cd $thisdir
+fi
+
+ddfile=$dbpath/$dbname.dd
+if [[ "$abort" = "no" && ! -f "$ddfile" ]] ; then
+  echo "***Error: The main metadata file '$ddfile' not found" >&2
+  abort=yes
+fi
+
+if [[ "$abort" = "yes" ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//' >&2
+  exit 1
+fi
+
+tables=$(egrep "^@" $ddfile | awk '{print $1}' | perl -pe 's#\@# #g;')
+npools=$(head -5 $ddfile | tail -1)
+
+for t in $tables
+do
+  subtables=$(set +e; \
+              egrep ":LINKOFFSET" $ddfile 2>/dev/null | egrep "\@$t" |\
+              awk '{print $1}'| perl -pe 's/^.*LINKOFFSET\(//' |\
+              awk -F\) '{print $1}')
+  for st in $subtables
+  do
+    echo "Processing parent-table '$t' against child-table '$st':"
+
+    sql_1="select \$#,count(*) as 'no_of_rows_in_$st' from $st"
+
+    sql_2="select \$#,min(LINKOFFSET($st)),min(LINKLEN($st)),"
+    sql_2="$sql_2  minloc(LINKOFFSET($st),#$t),minloc(LINKLEN($st),#$t) from $t"
+
+    sql_3="select \$#,max(LINKOFFSET($st)),max(LINKLEN($st)),"
+    sql_3="$sql_3  maxloc(LINKOFFSET($st),#$t),maxloc(LINKLEN($st),#$t) from $t"
+
+    offlen="$st.offset + min(0,$st.len)"
+    sql_4="select \$#,min($offlen),minloc($offlen,#$t) from $t"
+
+    offlen="$st.offset + $st.len"
+    sql_5="select \$#,max($offlen),maxloc($offlen,#$t) from $t"
+
+    sql="$sql_1; $sql_2; $sql_3; $sql_4; $sql_5;"
+    $ODB_BINPATH/odbsql -q "$sql" -i $dbpath -N 
+  done
+done

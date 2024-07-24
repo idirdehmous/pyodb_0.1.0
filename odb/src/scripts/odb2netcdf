@@ -1,0 +1,302 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15 
+#begin
+#
+# odb2netcdf : ODB interface to NetCDF
+#
+# Usage: odb2netcdf [-l dbname] [-v sqlfile1 ... [-v sqlfileN]]
+#                   [-q 'select_data_query']  : Supply your data query straight here!
+#                   [-t table_name]  : Supply a table name -- with or w/o '@'
+#                   [-p poolno]      : pool number to be processed ; can be supplied multiple times
+#                   [-n NPES]        : number of MPI-tasks (limited to 8)
+#                   [-N NPES]        : number of MPI-tasks ("unlimited")
+#                   [-j jobid]       : job identification ; if not supplied -> process id [non-odbsql only]
+#                   [-c name_configuration_file] : supply your own mods to std name configuration file
+#                   [-C]             : bypass name configuration processing altogether
+#                   [-r]             : re-use executable from previous call -> no compilations
+#                   [-P]             : for switching NetCDF packing OFF (by default is ON)
+#                   [-d]             : for debug mode
+#                   [-5]             : do NOT use fast I/O-method#5
+#                   [-m]             : merge results (of each view) into single file (valid for NPES=1 only)
+#                                      Please note that with odbsql-interface we always merge;
+#                                      If you want pool-by-pool results with odbsql, run this against
+#                                      each pool via -p <each_pool_in_turn>
+#                   [-F]             : do NOT use the fast odbsql interface
+#                   [-b]             : show progress bar (odbsql-approach only)
+#
+#     You have supply at least one SQL (or a table-name) via -v option
+#     or supply a data query directly via -q option, in which case query goes to file "myview.sql"
+#
+#end
+
+set -eu
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+namecfg=""
+no_namecfg=0
+debug=0
+nopacking=0
+dbname=""
+sqlfiles=""
+poolmask=""
+npes=1
+maxpes=8
+jobid=$$
+reuse=0
+errflg=0
+io_method=5
+query=""
+query_given=0
+merge=""
+fast=1
+progress_bar="-B"
+
+FLAGS=CdPrc:l:v:p:n:N:j:5q:mFbt:
+
+while getopts $FLAGS option
+do
+  case $option in
+    C) no_namecfg=1;;
+    d) debug=1;;
+    P) nopacking=1;;
+    r) reuse=1;;
+    c) namecfg=$OPTARG;;
+    l) dbname=$OPTARG;;
+    v) sqlfiles="$sqlfiles $OPTARG";;
+    t) sqlfiles="$sqlfiles @$OPTARG";;
+    p) poolmask="$poolmask $OPTARG";;
+    j) jobid=$OPTARG;;
+    n) npes=$OPTARG;;
+    N) npes=$OPTARG; maxpes=99999;;
+    5) io_method=0;;
+    q) query_given=1; query="$OPTARG"; sqlfiles="$sqlfiles myview.sql";;
+    m) merge="-m";;
+    F) fast=0;;
+    b) progress_bar="-b";;
+   \?) errflg=1;;
+  esac
+done
+
+if [[ "$dbname" = "" ]] ; then
+  dbname=$(basename "$(\ls -C1 *.dd 2>/dev/null | head -1)" .dd)
+fi
+
+if [[ "$dbname" = "" ]] ; then
+  echo "***Error: Database name (-l dbname) must be given"
+  errflg=1
+fi
+
+if [[ "$sqlfiles" = "" ]] ; then
+  echo "***Error: At least one sqlfile or table name must be given"
+  errflg=1
+fi
+
+if [[ $errflg -eq 1 ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 1
+fi
+
+if [[ $query_given -eq 1 ]] ; then
+  echo "$query" > myview.sql
+fi
+
+if [[ "$poolmask" != "" ]] ; then
+  poolmask=$(echo $poolmask | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g; s/[,]+/,/g')
+fi
+
+if [[ $nopacking -eq 1 ]] ; then
+  export ODB_NETCDF_NOPACKING=1
+else
+  export ODB_NETCDF_NOPACKING=0
+fi
+
+# check number of PEs and limit up to maxpes PEs
+if [[ $npes -lt 1 ]] ; then
+  npes=1
+fi
+if [[ $npes -gt $maxpes ]] ; then
+  npes=$maxpes
+fi
+
+if [[ $fast -eq 1 ]] ; then
+  #-- Do use odbsql -f netcdf -approach [the default]
+  rc=0
+  for sql in $sqlfiles
+  do
+    prefix=$(basename $sql | sed 's/\..*//')
+    sql=$(dirname $sql)/${prefix}.sql
+    cmd="odbsql -k -f netcdf $progress_bar"
+    if [[ "$poolmask" != "" ]] ; then
+      cmd="$cmd -p $poolmask"
+    fi
+    if [[ -f $sql ]] ; then
+      cmd="$cmd -v $sql"
+    else
+      tbl=$(echo "$prefix" | sed 's/@//g')
+      cmd="$cmd -v @$tbl"
+    fi
+    if [[ $npes -gt 1 ]] ; then
+      cmd="$cmd -n $npes"
+    fi
+    $cmd || rc=$?
+    [[ $rc -eq 0 ]] || break
+  done
+  exit $rc
+fi
+
+#--- Proceed with old-fashioned way (compilations etc. krap !) ...
+
+export NPES=$npes
+echo "Using NPES MPI-tasks: NPES=$NPES"
+
+Exe=./odb2netcdf.x
+if [[ ! -x $Exe ]] ; then
+  reuse=0
+fi
+
+if [[ ! -f lib$dbname.a ]] || \
+   [[ ! -f $dbname.ddl_ ]] || \
+   [[ ! -f ${dbname}.h  ]] || \
+   [[ $ODB_FEBINPATH/odb98.x -nt $dbname.ddl_ ]] || \
+   [[ $dbname.ddl -nt $dbname.ddl_ ]] ; then
+  newodb -z $dbname
+  reuse=0
+fi
+
+views=""
+consider=""
+
+for sql in $sqlfiles
+do
+  prefix=$(basename $sql | sed 's/\..*//')
+  sql=$(dirname $sql)/${prefix}.sql
+  if [[ -f $sql ]] ; then
+    views="$views -v $prefix"
+    if [[ -f $Exe && $sql -nt $Exe ]] ; then
+      reuse=0
+    fi
+  else
+    tbl=$(echo "$prefix" | sed 's/@//g')
+    consider="$consider $tbl"
+    views="$views -v @$tbl"
+  fi
+done
+
+if [[ $reuse -eq 0 ]] ; then
+  viewfiles=""
+  for sql in $sqlfiles
+  do
+    prefix=$(basename $sql | sed 's/\..*//')
+    sql=$(dirname $sql)/${prefix}.sql
+    if [[ -f $sql ]] ; then
+      viewfiles="$viewfiles $sql"
+    fi
+  done
+  if [[ "$viewfiles" != "" ]] ; then
+    odbcomp -w -l $dbname $viewfiles
+  fi
+fi
+
+if [[ "$consider" = "" ]] ; then
+  # the following hassle defines you the ODB_CONSIDER_TABLES (part#1)
+  export ODB_CONSIDER_TABLES=""
+  for cf in $(\ls -C1 ${dbname}_[a-z]*.c 2>/dev/null || :)
+  do
+    eval `fgrep '#define ODB_CONSIDER_TABLES' $cf | awk '{print "export",$2"="$3}'`
+    ODB_CONSIDER_TABLES=$(echo "$ODB_CONSIDER_TABLES" | perl -pe 'tr/A-Z/a-z/; s|/| |g;')
+    consider="$consider $ODB_CONSIDER_TABLES"
+  done
+  unset ODB_CONSIDER_TABLES
+fi
+
+if [[ "$consider" != "" ]] ; then
+  star=$(echo "$consider" | perl -pe 's/^.*\*.*/*/')
+  if [[ "$star" = '*' ]] ; then
+    export ODB_CONSIDER_TABLES='*'
+  else
+    # the following hassle defines you the ODB_CONSIDER_TABLES (part#2)
+    export ODB_CONSIDER_TABLES=$(echo "$consider" | perl -pe 's/\s*(\w+)\b/$1\n/g;' |\
+                                 sort -u | perl -pe 's/\n//g; s#\s*(\w+)\b#/$1#g; END {print "/";}')
+  fi
+else
+  export ODB_CONSIDER_TABLES='*'
+fi
+
+echo "==> ODB_CONSIDER_TABLES=$ODB_CONSIDER_TABLES"
+
+if [[ "$poolmask" != "" ]] ; then
+  export ODB_PERMANENT_POOLMASK="$poolmask"
+  echo "==> ODB_PERMANENT_POOLMASK=$ODB_PERMANENT_POOLMASK"
+fi
+
+rm_namecfg=0
+if [[ $no_namecfg -eq 1 ]] ; then
+  export ODB_NAMECFG_$dbname=/dev/null
+  echo "==> Name configuration processing bypassed"
+elif [[ -r "$namecfg" ]] ; then
+  tmp=$(eval echo \$ODB_NAMECFG_$dbname 2>/dev/null || :)
+  if [[ "$tmp" = "" ]] ; then
+    tmp=$(echo $ODB_NAMECFG 2>/dev/null || :)
+  fi
+  if [[ -r "$tmp" ]] ; then
+    tmp_namecfg=tmp_namecfg.$$
+    cat $tmp $namecfg > $tmp_namecfg || :
+    rm_namecfg=1
+  else
+    tmp_namecfg=$namecfg
+  fi
+  export ODB_NAMECFG_$dbname="$tmp_namecfg"
+  echo "==> ODB_NAMECFG_$dbname=$tmp_namecfg"
+fi
+
+if [[ $debug -eq 1 ]] ; then
+  export ODB_NETCDF_DEBUG=1
+  export ODB_IO_TRACE=1
+else
+  export ODB_NETCDF_DEBUG=0
+fi
+echo "==> ODB_NETCDF_DEBUG=$ODB_NETCDF_DEBUG"
+
+echo "==> ODB_NETCDF_NOPACKING=$ODB_NETCDF_NOPACKING"
+
+if [[ -f $Exe && $ODB_LIBPATH/libodbmain.a -nt $Exe ]] ; then
+  reuse=0
+fi
+
+if [[ $reuse -eq 0 ]] ; then
+  obj=Odb2netcdf.o
+  if [[ ! -f $obj ]] || [[ $ODB_LIBPATH/libodbmain.a -nt $obj ]] ; then
+    ar x $ODB_LIBPATH/libodbmain.a $obj
+  fi
+
+  odbf90mp -o $Exe $obj -L. -l$dbname
+fi
+
+if [[ $io_method -eq 5 ]] ; then
+  if [[ "$ODB_CONSIDER_TABLES" = '*' ]] ; then
+    tables=""
+  else
+    tables=$(echo "$ODB_CONSIDER_TABLES" | perl -pe 's#/(\w+)# -t $1#g; s#/##g;')
+  fi
+  dbdir=.
+  if [[ ! -d $dbdir/dca ]] ; then
+    mkdir $dbdir/dca
+  else
+    dcafix $dbdir/dca/*.dca 2>/dev/null
+  fi
+  dcagen -l $dbname $tables -n
+  export ODB_IO_METHOD=5
+#  unset ODB_CONSIDER_TABLES
+fi
+
+#export ODB_CATCH_SIGNALS=1
+#export ODB_ERRTRA=1
+echo  "mpirun.ibm -np $NPES $Exe -l $dbname $views $merge -j $jobid"
+       mpirun.ibm -np $NPES $Exe -l $dbname $views $merge -j $jobid
+
+if [[ $rm_namecfg -eq 1 ]] ; then
+  rm -f $tmp_namecfg
+fi
+
+exit 0

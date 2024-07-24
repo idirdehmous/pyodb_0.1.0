@@ -1,0 +1,4 @@
+Observed time (hour)
+time@hdr
+0 240000 ! Time range in original units (here: HHMMSS)
+2,0.0001,0 ! Method=2 --> Scaling: int(0.0001 * time) + 0

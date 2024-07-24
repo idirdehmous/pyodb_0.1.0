@@ -1,0 +1,39 @@
+#
+# Script to export ODB environment variables (sh, ksh, bash, etc.)
+#
+# Usage: [ODB_ROOT=<dir>] ; source use_odb.sh
+#
+
+if [ -z "$ODB_ROOT" ]; then
+  ODB_ROOT="@CMAKE_INSTALL_PREFIX@"
+fi
+
+unset found_pc_file
+for pc_dir in $ODB_ROOT $ODB_ROOT/lib/pkgconfig; do
+  pc_file=$pc_dir/odb.pc      
+  if [ -f $pc_file ]; then
+    found_pc_file=1
+    break
+  fi
+done
+
+if [ -z "$found_pc_file" ]; then
+  echo "error: Could not find 'odb.pc' file in ODB_ROOT directory '$ODB_ROOT'" 1>&2
+  false
+else
+
+pc_prefix="--define-variable=prefix=$ODB_ROOT"
+
+PATH="$ODB_ROOT/bin:$PATH"; export PATH
+ODB_INCLUDE=`pkg-config $pc_file $pc_prefix --cflags`; export ODB_INCLUDE
+ODB_LIB=`pkg-config $pc_file $pc_prefix --static --libs`; export ODB_LIB
+
+while read line; do
+  if echo $line | grep -q "^ODB.*="; then
+    name=`echo $line | cut -d '=' -f 1`
+    eval $name="'`pkg-config $pc_file $pc_prefix --variable=$name`'"
+    export $name
+  fi
+done < $pc_file
+
+fi

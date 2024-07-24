@@ -1,0 +1,351 @@
+#!/bin/ksh
+#create_ioassign      version:  20130305
+
+set -eu
+#=======================================================================
+#
+#     Script create_ioassign     
+#     ----------------------
+#                         
+#     Purpose     : To create IOASSIGN file for the given ODB database
+#                               
+#     Usage       :  create_ioassign
+#     -----                -l dbname   ; database name
+#                          [-d dirname ; location of ioassign_file]
+#                          [-n npools]
+#                          [-x] ; expand ioassign_file to get rid of percent-d's
+#                          [-t task] ; component databases; use with -x
+#                          [-s]      ; use this if surface analysis
+#                          [-e]      ; use this if ensemble data assimilation
+#                          [-q]      ; be quiet (except for fatal errors)
+#                                            
+#     Parameters  : dbname    - database name, like ECMA or CCMA; must be supplied
+#     ----------    dirname   - directory where the IOASSIGN will be placed ;
+#                               the default: $PWD
+#                   npools    - number of pools (default: from $dbname/ECMA.dd)
+#                   task      - component database(s); like -t amsua for ECMA.amsua
+#
+#=======================================================================
+
+ARGS="$0 $*"
+USAGE1="$0 -l dbname [-d dirname] [-n npools]"
+USAGE2="   [-x (to expand ioassign) [-s (if surface analysis)] -t task1 [-t task2] ...]"
+USAGE3="   [-q (quiet)] [-b iobufsize]"
+
+dbname=none
+dir=.
+npools=0
+expand=0
+alltasks=""
+surf=0
+ensemble=0
+silence=0
+
+errflg=0
+
+FLAGS="d:l:n:sqt:xe"
+
+while getopts $FLAGS option
+do
+  case $option in
+    l) dbname=$OPTARG;;
+    d) dir="$OPTARG";;
+    n) npools=$OPTARG;;
+    s) surf=1;;
+    e) ensemble=1;;
+    q) silence=1;;
+    t) alltasks="$alltasks $OPTARG";;
+    x) expand=1;;
+   \?) errflg=1;;
+  esac
+done
+
+if [[ $silence -eq 0 ]] ; then
+  echo "$ARGS" >&2
+fi
+
+#=======================================================================
+#   Check parameters
+#=======================================================================
+
+if [[ $dbname = none ]] ; then
+  echo "$0: An invalid dbname=$dbname was supplied via -l option" >&2
+  errflg=1
+fi
+
+[[ -d $dir ]] || mkdir -p $dir || errflg=1
+
+if [[ ! -d $dir ]] ; then
+  echo "$0: Database dir '$dir' not found" >&2
+  errflg=1
+fi
+
+if [[ $expand -eq 1 && "$alltasks" = "" ]] ; then
+  alltasks=$(cd $dir/.. ; \ls -C1pd $dbname.* | \
+             awk -F/ '{print $1}' | sed "s/^$dbname\.//g" | sort -u)
+fi
+
+if [[ $errflg -ne 0 ]] ; then
+  echo "$ARGS" >&2
+  echo $USAGE1 >&2
+  echo $USAGE2 >&2
+  echo $USAGE3 >&2
+  exit 1
+fi
+
+ddfile=$dir/$dbname.dd
+
+if [[ $npools -le 0 ]] ; then # try to find out correct no. of pools
+  if [[ -s $ddfile ]] ; then
+    npools=$(head -5 $ddfile | tail -1)
+  else
+    npools=${ODB_IOASSIGN_MAXPROC:=0} # If == 0, can be usually a bad thing ;-(
+  fi
+  if  [[ $silence -eq 0 ]] ; then
+  echo "$0: Total no. of pools was detected automatically from file '$ddfile' ;" >&2
+  echo "    Using value for npools='$npools'" >&2
+  fi
+fi
+
+io_method=${ODB_IO_METHOD:=4}
+if [[ -s $ddfile ]] ; then
+  iom=$(head -1 $ddfile | awk 'BEGIN {n=0;} {if (NF >= 3) n=$3;} END {print n;}')
+  [[ $iom -ne 0 ]] || io_method=$iom
+fi
+
+#-- More I/O-buffering when either less pools or I/O-method found to be horizontal concatenation
+if [[ $npools -lt 32 ]] || [[ $io_method -eq 4 ]] ; then
+  iodef="-r 8m -w 8m -p 8m -e 8m"
+else
+  iodef="-r 1m -w 1m -p 1m -e 1m"
+fi
+
+#-- Get list of tables either from existing $ddfile or using latest known tables
+
+if [[ -s $ddfile ]] ; then
+  tables=$(egrep "^@" $ddfile | awk '{print $1}' | perl -pe 's#\@# #g;')
+else
+#-- Known tables in alphabetical order
+
+  tables="aeolus_auxmet aeolus_hdr aeolus_l2c"
+  tables="$tables body bufr bufr_tables bufr_tables_desc"
+  tables="$tables ddrs desc errstat hdr index poolmask resat"
+  tables="$tables rtovs rtovs_body rtovs_mlev rtovs_pred rtovs_slev"
+  tables="$tables sat satem satob scatt scatt_body smos ralt"
+  tables="$tables ssmi ssmi_body ssmi_mlev ssmi_slev"
+  tables="$tables timeslot_index update limb resat_averaging_kernel"
+  tables="$tables radar radar_body radar_station"
+  tables="$tables surfbody_feedback modsurf radiance allsky co2_sink cloud_sink collocated_imager_information"
+  tables="$tables auxiliary auxiliary_body radiance_body allsky_body fcdiagnostic"
+  tables="$tables gbrad gbrad_body gnssro gnssro_body"
+  tables="$tables ensemble conv conv_body raingg raingg_body"
+
+  #-- Include only minimal amount of update tables
+  #   Note: can't use MXUP_TRAJ, since $NMXUPD in data layout may have a larger value
+
+  jpmxup=10 # from source code of IFS ; see ifs/module/parcma.F90
+
+  uptraj=0
+  while [[ $uptraj -lt $jpmxup ]]
+  do
+    ((uptraj += 1))
+    tables="$tables update_$uptraj"
+  done
+
+  jpmxenkf=120 # from source code of IFS ; see ifs/module/parcma.F90
+  enkf_count=0
+  while [[ $enkf_count -lt $jpmxenkf ]]
+  do
+    ((enkf_count += 1))
+    tables="$tables enkf_$enkf_count"
+  done
+
+  jpmxenda=100 # from source code of IFS ; see ifs/module/parcma.F90
+  enda_count=0
+  while [[ $enda_count -lt $jpmxenda ]]
+  do
+    ((enda_count += 1))
+    tables="$tables enda_$enda_count"
+  done
+  enda_count=0
+  while [[ $enda_count -lt $jpmxenda ]]
+  do
+    ((enda_count += 1))
+    tables="$tables surfbody_feedback_$enda_count"
+  done
+
+  jpmxfcdiag=20 #from source code of IFS ; see ifs/module/parcma.F90
+  fcdiag_count=0
+  while [[ $fcdiag_count -lt $jpmxfcdiag ]]
+  do
+    ((fcdiag_count += 1))
+    tables="$tables fcdiagnostic_body_$fcdiag_count"
+  done
+fi
+
+#-- Start creating IOASSIGN-file (in the fastest possible way ?)
+#   ioassign -s -n $npools $iodef -a \$ODB_DATAPATH_$dbname/%d/$cmd $dbname..%d
+
+unset IOASSIGN  || :
+tmpfile=__ioassign__.$$
+cat /dev/null > $tmpfile
+
+ioassign -s -a \$ODB_SRCPATH_$dbname/$dbname.dd $dbname           >> $tmpfile
+ioassign -s -a \$ODB_SRCPATH_$dbname/$dbname.sch $dbname.sch      >> $tmpfile
+ioassign -s -a \$ODB_SRCPATH_$dbname/$dbname.flags $dbname.flags  >> $tmpfile
+ioassign -s -a \$ODB_SRCPATH_$dbname/$dbname.iomap $dbname.iomap  >> $tmpfile
+
+#-- dca : direct column access -files (globally one file per table)
+#         only applicable for self-contained databases i.e. $expand == 0
+dcadir=dca
+if [[ $expand -eq 0 ]] && [[ $alltasks == "" ]] ; then
+    echo "tables=$tables"
+    awk \
+    '(NR==1) { dca=$0; };(NR >= 2) { \
+            for (i=1; i<=NF; i++) { x=dca; gsub("TABLENAME",$i,x); print x; }}' >> $tmpfile \
+    <<EOF
+$(ioassign -s -a \$ODB_SRCPATH_$dbname/$dcadir/TABLENAME.dca $dbname.TABLENAME.dca)
+$tables
+EOF
+fi
+
+if [[ $expand -eq 0 ]] ; then # Retain percent-d's
+  #-- Sense whether gzipped already ?
+  hdrgz=$(find [0-9]* -type f -name 'hdr.gz' -print 2>/dev/null | head -1)
+  if [[ "$hdrgz" != "" ]] ; then
+    cmd=".gz -c #gzip"
+  else
+    cmd=""
+  fi
+
+  if [[ $ensemble -eq 1 ]] ; then
+    dots="/../../"
+  else
+    dots="/"
+  fi
+
+  #-- No gzipping of QTARFILE ($ODB_IO_METHOD = 3)
+  ioassign -s -n $npools $iodef -a \$ODB_DATAPATH_$dbname/%d/QTARFILE $dbname.QTARFILE.%d >> $tmpfile
+
+  if [[ $alltasks != "" ]];then #e.g. multiple tasks - ECMA.conv, ECMA.amsua etc
+    if [[ $surf -eq 1 ]] ; then
+      dots="/../../"
+    else
+      dots="/../"
+    fi
+
+    p=0
+    for task in $alltasks
+    do
+      # read npools in this xCMA.x from the .dd file
+      d=$dir$dots$dbname.$task
+      ddfile=$d/$dbname.dd
+      np=$(head -5 $ddfile | tail -1)
+      # Calculate global pool number range for this ECMA.x
+      ((psta = p + 1))
+      ((pend = p + np))
+      p=$pend
+      ioassign -S $psta -s -n $np $iodef -a \$ODB_DATAPATH_$dbname$dots$dbname.$task/%d/%s$cmd $dbname.%s.%d >> $tmpfile
+    done
+  else # e.g. single CCMA
+    ioassign -s -n $npools $iodef -a \$ODB_DATAPATH_$dbname$dots%d/%s$cmd $dbname.%s.%d >> $tmpfile
+  fi
+
+else # Expand
+
+  #-- Create template file for table=_xxx_ for subsequent filtering
+  tbl=_xxx_
+  template=__template__.$$
+  cat /dev/null > $template
+  p=0
+  if [[ $surf -eq 1 ]] ; then
+    dots="../.."
+  else
+    dots=".."
+  fi
+  for task in $alltasks
+  do
+    d=$dir/$dots/$dbname.$task
+    ddfile=$d/$dbname.dd
+    if [[ $silence -eq 0 ]] ; then
+    echo "$0: Processing $ddfile ; p=$p" >&2
+    fi
+    if [[ -s $ddfile ]] ; then
+      #-- Sense whether gzipped already ?
+      hdrgz=$(find [0-9]* -type f -name 'hdr.gz' -print 2>/dev/null | head -1)
+      if [[ "$hdrgz" != "" ]] ; then
+        cmd=".gz -c #gzip"
+      else
+        cmd=""
+      fi
+      np=$(head -5 $ddfile | tail -1)
+      ((psta = p + 1))
+      ((pend = p + np))
+      #-- In the following the %d after "-a" option i.e. physical filename 
+      #   expands (-x) between range [1 .. $np], but the logical filename's %d
+      #   expands between range [$psta .. $pend] i.e [$psta .. $psta + $np - 1] (due to -S)
+      ioassign -s -x -n $np -S $psta $iodef \
+               -a \$ODB_DATAPATH_$dbname/$dots/$dbname.$task/%d/$tbl$cmd \
+               $dbname.$tbl.%d >> $template
+      p=$pend
+    fi # if [[ -s $ddfile ]]
+  done
+
+  if [[ $p -ne $npools ]] ; then
+    if [[ $silence -eq 0 ]] ; then
+    echo "$0: ***Warning: Inconsistent no. of pools found=$p ; expected=$npools" >&2
+  fi
+  fi
+
+  #-- Now filter "_xxx_" across all tables using Perl to create final IOASSIGN-file
+#  for tbl in $tables
+#  do
+#    perl -pe "s/_xxx_/$tbl/g" < $template >> $tmpfile
+#  done
+cat << \EOF > create_ioassign_perl.pl
+
+use strict;
+use warnings;
+
+my $tables = $ENV{'tables'};
+my @tables=split(/\s+/,$tables);
+my $templ_file=$ENV{'template'};
+my $tmpfile=$ENV{'tmpfile'};
+
+my(@lines);
+
+if(!open(INFIL,$templ_file)) {
+   print STDERR "Can't open $templ_file for reading\n";
+   die("Can't open $templ_file for reading\n");
+}
+open(OUT,">>$tmpfile");
+@lines=<INFIL>;
+close INFIL;
+
+my $line;
+for (@tables) {
+  my $tbl=$_;
+  for (@lines) {
+    $line=$_;
+    $line=~s/_xxx_/$tbl/g;
+    print OUT $line;
+  }
+}
+
+EOF
+
+  export tables template tmpfile
+  perl create_ioassign_perl.pl
+  rm -f $template
+fi
+
+rm -f $dir/*IOASSIGN* || true
+cp $tmpfile $dir/$dbname.IOASSIGN
+
+rm -f $tmpfile
+
+# for compatibility & convenience
+(cd $dir ; \rm -f IOASSIGN.$dbname ; \ln -s $dbname.IOASSIGN IOASSIGN.$dbname)
+(cd $dir ; \rm -f IOASSIGN         ; \ln -s $dbname.IOASSIGN IOASSIGN)
+
+exit 0

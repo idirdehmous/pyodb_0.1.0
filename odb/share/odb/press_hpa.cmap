@@ -1,0 +1,5 @@
+Pressure (hPa)
+obsvalue@body
+0,-1 ! Automatic
+1,0.01,0 ! Method=1 --> Scaling: 0.01 * press + 0
+

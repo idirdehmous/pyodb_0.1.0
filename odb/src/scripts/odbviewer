@@ -1,0 +1,900 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15 
+#begin
+#
+# Usage: odbviewer [-i database_input_dir]   : default = current dir
+#                  [-o report_output_dir]    : default = $SCRATCH/My_Views/db.xxx.yyy.zzz
+#                  [-v viewname]             : default = <none>
+#                  [-e editor]               : default = that of in $ODB_EDITOR
+#                  [-n number_of_OpenMP-PEs] : default = 1 : No. of OpenMP PE's (note: changed meaning)
+#                  [-D debugger]             : default = none (f.ex. 'cvd' or 'dbx')
+#                  [-s memory_size in MB]    : default = 100  # Obsolete
+#                  [-x x_coord_column_#]     : default = $ODB_XY_COL_X
+#                  [-y y_coord_column_#]     : default = $ODB_XY_COL_Y
+#                  [-t time_column_#]        : default = $ODB_XY_COL_T
+#                  [-f alternate_layout_file]: default = <none>
+#                  [-p specific_pool_number(s)] : default = <none> ; comma separated list
+#                  [-a]                      : default = no ; append to existing plotfile/rptfile
+#                  [-c]                      : clean all
+#                  [-d]                      : run dcagen for tables mentioned in SQL (optional for now)
+#                  [-r]                      : radians to degrees conversion for (lat,lon)
+#                                              (or columns ($ODB_VIEWER_LAT, $ODB_VIEWER_LON))
+#                  [-5]                      : de-activate I/O-method#5 (i.e. do not use fast DCA-access)
+#                  [-S]                      : do *not* suggest default SQL-file (default = suggest)
+#                  [-R]                      : set ODB_VIEWER_RAD2DEG=0 regardless of database name
+#                  [-T]                      : set ODB tracing on
+#                  [-I]                      : do *NOT* plot immediately (i.e. do not use plotobs.x with -s option)
+#                  [-N]                      : turn ODB_REPORTER off i.e. no report-files (maybe only plots wanted?)
+#                  [-C color_map_file]       : supply marker colors via ODB_VIEWER_COLOR_MAP_FILE
+#                  [-A plot_area]            : plotting area; default = -90,-180,90,180[,map_scale=50e6]
+#                  [-P projection]           : default = CYLINDRICAL (other: AITOFF, POLAR[_STEREOGRAPHIC], MERCATOR, LAMBERT)
+#                  [-O other_options]        : Passes on additional options for the plotobs.x
+#                  [-q 'select_data_query']  : Supply your data query straight here!
+#                  [-b]                      : Report-file is written in binary format
+#                  [-k]                      : Konvert (lat,lon) to degrees for plot AND textual output
+#                                              The same as if you have ODB_VIEWER_RAD2DEG=2
+#                                              Note: Does not convert anything if ODB_PLOTTER=0 i.e. plots disabled
+#                  [-M]                      : Turn off Magics plot generation i.e. set ODB_PLOTTER=0
+#                  [-0]                      : Set ODB_REPORTER=stderr (fileno=0) i.e. all output stderr comes to "screen"
+#                  [-1]                      : Set ODB_REPORTER=stdout (fileno=1) i.e. all output comes to "screen"
+#                  [-h]                      : Print help/usage and abort
+#                  [-H dr_hook_opt]          : Enable Dr.Hook profiler and export DR_HOOK_OPT with dr_hook_opt
+#                  [-V virtual_poolmap_file] : Supply user pool-mapping
+#                  [-F]                      : Do *NOT* use the new, Fast odbsql and revert to slow compilations
+#                  [-B]                      : Turn blurps off (progress bar off); implied -B with -e pipe or -e batch
+#                  [-Z]                      : Do *NOT* produce gzip'ped plotfile's (default is to produce, unless -F is used)
+#                  [-w]                      : Produce wind-arrow plot
+#                  [database_name]           : If not given, try to figure out from *.dd file in the current dir
+#
+#end
+
+export SHELL=/bin/ksh
+
+test_arch=$(test_arch 2>/dev/null || echo "unknown")
+
+FLAGS=aA:bBcC:dD:e:f:FhH:i:IkNn:Mo:O:p:P:q:rRs:St:Tv:V:wx:y:Z015
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+dcagen=0
+suggest=1
+suggest_arg=""
+clean=0
+dbdir=$(pwd)
+outdir=$(pwd)
+dbname=
+viewname=myview
+export NPES=${NPES:=1}
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:=1}
+memsize=900
+debugger=
+layout=
+f_layout=
+poolmask=""
+append=0
+rad2deg=0
+rad2deg_zeroed=0
+konvert_opt=""
+io_method=5
+trace=0
+trace_arg=""
+plot_immed=1
+#plot_area=-90,-180,90,180
+#plot_proj=CYLINDRICAL
+plot_area=""
+plot_proj=""
+plot_opt=""
+binary=0
+query=""
+query_given=0
+drhookopt=""
+poolmap="/dev/null"
+fast=1
+fastopt=""
+gz=".gz"
+gzopt=""
+bar_onoff="-b"
+warrow=""
+
+tty -s || {
+  export ODB_EDITOR=pipe
+  export ODB_VIEWER_INFORM_PROGRESS=0
+  bar_onoff="-B"
+}
+
+#-- Disable progress bar ? Set the following to 0
+if [[ "$test_arch" = @(nectx) ]] ; then
+  export ODB_EDITOR=pipe
+  export ODB_VIEWER_INFORM_PROGRESS=0
+  bar_onoff="-B"
+fi
+
+export FIRST_TIME=${FIRST_TIME:=1}
+
+abort=no
+while getopts ${FLAGS} i
+do
+  case $i in
+  a)    append=1;;
+  A)    plot_area="$OPTARG";;
+  b)    binary=1;;
+  B)    bar_onoff="-B"; export ODB_VIEWER_INFORM_PROGRESS=0;;
+  c)    clean=1;;
+  C)    export ODB_VIEWER_COLOR_MAP_FILE="$OPTARG";;
+  d)    dcagen=1;;
+  D)	debugger=$OPTARG;;
+  e)	export ODB_EDITOR="$OPTARG";;
+  f)	layout="$OPTARG";;
+  F)	fast=0; fastopt="-F"; gz=""; gzopt="-Z";;
+  h)    abort=yes; break;;
+  H)    drhookopt="$OPTARG";;
+  i)	dbdir="$OPTARG";;
+  I)    plot_immed=0;;
+  k)    rad2deg=2;;
+  n)	export OMP_NUM_THREADS="$OPTARG";; # Note : changed meaning for -n ncpus : ncpus == OpenMP procs
+  N)    export ODB_REPORTER=0;;
+  M)    export ODB_PLOTTER=0;;
+  o)	outdir="$OPTARG";;
+  O)    plot_opt="$plot_opt $OPTARG";;
+  p)    poolmask="$poolmask $OPTARG";;
+  P)    plot_proj=$(echo $OPTARG | perl -pe 'tr/a-z/A-Z/');;
+  q)    suggest=0; query_given=1; query="$OPTARG";;
+  r)    rad2deg=1;;
+  R)    rad2deg=0; rad2deg_zeroed=1;;
+  s)	memsize=$OPTARG;;
+  S)    suggest=0; suggest_arg="-S";;
+  t)	export ODB_XY_COL_T="$OPTARG";;
+  T)    trace=1; trace_arg="-T";;
+  v)	viewname="$OPTARG";;
+  V)    poolmap="$OPTARG";;
+  w)    warrow="w";;
+  x)	export ODB_XY_COL_X="$OPTARG";;
+  y)	export ODB_XY_COL_Y="$OPTARG";;
+  Z)	gz=""; gzopt="-Z";;
+  0)    export ODB_REPORTER=stderr;;
+  1)    export ODB_REPORTER=stdout;;
+  5)    io_method=-1;; # Setting this to a <=0 value will ensure I/O-method 5 will NOT be used
+                       # If > 0, there is an automatic test for READ/ONLY databases, whether ./dca
+                       # directory exists. But keeping I/O-method <= 0 bypasses this testing
+  *)	abort=yes; break;;
+  esac
+done
+
+export ODB_READONLY=${ODB_READONLY:=1}
+
+if [[ "$ODB_EDITOR" = "batch" ]] ; then
+  export ODB_EDITOR=pipe
+fi
+
+if [[ X"${ODB_EDITOR:-}" != Xpipe ]] ; then
+  odb_banner odbviewer 2>/dev/null || :
+  echo "ODB_VERSION=$ODB_VERSION"
+  echo "ODB_SYSPATH=$ODB_SYSPATH"
+  echo "ODB_BINPATH=$ODB_BINPATH"
+  [[ "$ODB_FEBINPATH" = "$ODB_BINPATH" ]] || echo "ODB_FEBINPATH=$ODB_FEBINPATH"
+  [[ "$ODB_BEBINPATH" = "$ODB_BINPATH" ]] || echo "ODB_BEBINPATH=$ODB_BEBINPATH"
+else
+  bar_onoff="-B"
+  export ODB_VIEWER_INFORM_PROGRESS=0
+  plot_immed=0
+  # Avoid "pop-ups" of report window in batch/pipe-mode
+  export DISPLAY=nodisplay:0
+  unset DISPLAY
+fi
+
+if [[ "$bar_onoff" = "-B" ]] ; then
+  bar_onoff_opt="-B"
+else
+  bar_onoff_opt=""
+fi
+
+shift $(expr $OPTIND - 1)
+
+if [[ $# -gt 1 ]] || [[ "$abort" = "yes" ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 1
+fi
+
+export PWD=$(pwd)
+#echo "dbdir=$dbdir"
+
+cd $dbdir || {
+	echo "***Error: Cannot cd to database directory dbdir='$dbdir'"
+	exit 2
+}
+dbdir=$(pwd)
+
+if [[ $# -eq 0 ]] ; then
+#  dbname=$(basename $PWD | perl -pe 's/^\s*(.*)\..*/\U$1/;')
+  dbname=$(basename "$(\ls -C1 *.dd 2>/dev/null | head -1)" .dd)
+else
+  dbname=$1
+fi
+
+if [[ "$ODB_EDITOR" != "pipe" ]] ; then
+  echo "dbname=$dbname"
+fi
+
+if [[ $clean -eq 1 ]] ; then
+  odbclean -f -c
+fi
+
+#
+# Check for data dictionary file first
+#
+
+ddfile=$dbname.vdd
+if [[ -f $ddfile ]] ; then
+  [[ "$layout" = "@" ]] && layout=
+else
+  ddfile=$dbname.dd
+fi
+
+if [[ ! -f $ddfile ]] ; then
+  echo "***Error: Data dictionary file '$ddfile' not found"
+  exit 3
+fi
+
+if [[ $NPES -ne 1 ]] ; then
+#  echo "***Warning: Sorry, but odbviewer is permanently broken for NPES not equal to 1; NPES reset to 1"
+  export NPES=1
+fi
+
+npools=$(head -5 $ddfile | tail -1)
+[[ $NPES -gt $npools ]] && export NPES=$npools
+
+if [[ -s $ddfile ]] ; then
+  iom=$(head -1 $ddfile | awk 'BEGIN {n=1;} {if (NF >= 3) n=$3;} END {print n;}')
+else
+  iom=1
+fi
+
+#-- Make sure the .odbprune_done file exists; if not, generate it (this should be very quick)
+
+if [[ ! -f $dbdir/.odbprune_done ]] ; then
+  odbprune -i $dbdir >/dev/null 2>&1 || :
+fi
+
+#-- remove possible file (not dir) $dbdir/dca, and if not successful then possible *empty* $dbdir/dca dir
+\rm $dbdir/dca 2>/dev/null || rmdir $dbdir/dca 2>/dev/null || :
+
+export ODB_IO_METHOD=${ODB_IO_METHOD:=$io_method}
+if [[ $io_method -eq 5 && ! -d $dbdir/dca ]] ; then
+#  ODB_IO_METHOD=$iom
+  ODB_IO_METHOD=0 # for now
+fi
+echo "ODB_IO_METHOD=$ODB_IO_METHOD"
+
+#
+# Compile new layout ?
+#
+
+compiled=false
+
+if [[ ! -f $dbname.sch ]] || [[ "$layout" = "@" ]] ; then
+  if [[ -f "$ddfile" ]] ; then
+    dd2ddl $dbname
+    layout=$dbname.ddl
+    compiled=true
+  else
+    echo "***Error: Data dictionary file $ddfile cannot be located"
+    exit 1
+  fi
+fi
+
+if [[ ! -f $dbname.sch ]] ; then
+  if [[ ! -f ${dbname}_H.h ]] && [[ -f ${dbname}.h ]] ; then
+    ln -s ${dbname}.h ${dbname}_H.h
+  fi
+fi
+
+if [[ "$layout" = "" ]] ; then
+  layout=$dbname.sch
+fi
+
+errfile=$(pwd)/__errors__
+rm -f $errfile
+
+if [[ ! -f lib$dbname.a ]] || \
+   [[ ! -f $dbname.ddl_ ]] || \
+   [[ ! -f ${dbname}.h  ]] || \
+   [[ $ODB_FEBINPATH/odb98.x -nt $dbname.ddl_ ]] || \
+   [[ $dbname.ddl -nt $dbname.ddl_ ]] ; then
+  if [[ ! -f $dbname.ddl ]] && [[ "$layout" != "$dbname.ddl" ]] ; then
+    cp -p $layout $dbname.ddl
+    chmod u+w $dbname.ddl
+  fi
+  if [[ $fast -eq 0 ]] ; then
+#  odbcomp $dbname.ddl || exit 1
+    if [[ "$ODB_EDITOR" = "pipe" ]] || [[ "$viewname" = "" ]] ; then
+      subproc=""
+    else
+      subproc="&"
+    fi
+    eval "newodb $dbname || touch $errfile $subproc"
+    if [[ "$ODB_EDITOR" = "pipe" ]] || [[ "$viewname" = "" ]] ; then
+      [[ ! -f $errfile ]] || exit 1
+    fi
+  fi
+  f_layout="-f $dbname.ddl"
+  compiled=true
+fi
+
+if [[ "$ODB_EDITOR" != "pipe" ]] ; then
+  echo "dbdir=$dbdir"
+fi
+
+slash2dot=$(echo $dbdir | sed 's%/%\.%g')
+[[ "$outdir" = "" ]] && outdir=$SCRATCH/my_odb_views/db$slash2dot
+
+if [[ "$ODB_EDITOR" != "pipe" ]] ; then
+  # echo "outdir=$outdir"
+  echo "viewname=$viewname"
+  echo "memsize=$memsize"
+fi
+
+[[ -d $outdir ]] || mkdir -p $outdir
+thisdir=$(pwd)
+cd $outdir || {
+	echo "***Error: Cannot cd to output directory outdir='$outdir'"
+	wait
+	exit 3
+}
+outdir=$(pwd)
+cd $thisdir
+if [[ "$ODB_EDITOR" != "pipe" ]] ; then
+  echo "outdir=$outdir"
+  #echo "Report output directory is $(pwd)"
+fi
+
+#if [[ "$layout" != "" ]] ; then
+#  if [[ -f $dbdir/$dbname.ddl_ ]] ; then
+#    cp $dbdir/$dbname.ddl_ . 2>/dev/null || :
+#    chmod u+w $dbname.ddl_
+#  fi
+#  if [[ -f $dbdir/${dbname}_H.h ]] ; then
+#    cp $dbdir/${dbname}_H.h . 2>/dev/null || :
+#    chmod u+w ${dbname}_H.h
+#  fi
+#  if [[ -f $dbdir/${dbname}.h ]] ; then
+#    cp $dbdir/${dbname}.h . 2>/dev/null || :
+#    chmod u+w ${dbname}.h
+#  fi
+#fi 
+
+export ODB_STATIC_LINKING=${ODB_STATIC_LINKING:=0}
+export ODB_OUTPATH=$outdir
+export ODB_SRCPATH_$dbname=$dbdir
+export ODB_DATAPATH_$dbname=$dbdir
+
+if [[ -f $dbdir/$dbname.IOASSIGN ]] ; then
+  export IOASSIGN=$dbdir/$dbname.IOASSIGN
+elif [[ -f $dbdir/IOASSIGN ]] ; then
+  export IOASSIGN=$dbdir/IOASSIGN
+elif [[ -f $dbdir/IOASSIGN.$dbname ]] ; then
+  export IOASSIGN=$dbdir/IOASSIGN.$dbname
+else
+  echo "***Error: IOASSIGN-file for '$dbname' not present"
+  wait
+  exit 3
+fi
+
+[[ "$debugger" != "" ]] && export NPES=1
+if [[ "$ODB_EDITOR" != "pipe" ]] ; then
+  echo "debugger=$debugger"
+  echo "NPES=$NPES"
+fi
+
+Exe1PE=$ODB_BINPATH/viewer.1.x.blaah
+
+export MP_HOSTFILE=/dev/null
+if [[ $NPES -eq 1 && -x $Exe1PE ]] ; then
+  echo "Using one-PE executable '$Exe1PE'"
+  Exe=$Exe1PE
+else
+  Exe=$ODB_BINPATH/viewer.x
+  if [[ "$ARCH" = "xsgimips" ]] ; then
+    Exe="mpirun -np $NPES $Exe"
+    export MPI_BUFS_PER_PROC=256
+    export MPL_MBX_SIZE=$(((MPI_BUFS_PER_PROC+16)*16*1024))
+    export MPI_NAP=yes
+  elif [[ "$test_arch" = @(linux|aix|solaris|cygwin|nec*|cray_*) ]] ; then
+    Exe=$outdir/user_viewer.x
+    if [[ $NPES -gt 1 ]] ; then
+      export MPL_MBX_SIZE=64000000
+      export MP_PROCS=$NPES
+      export MP_SHARED_MEMORY=yes
+      export MP_WAIT_MODE=poll
+      export OMP_NUM_THREADS=${OMP_NUM_THREADS:=1}
+      export XLSMPOPTS="parthds=:stack=50000000 : spins=500000 : yields=50000"
+      export _RLD_ARGS="-log /dev/null"
+      export MP_COREFILE_FORMAT=STDERR
+      export MP_HOSTFILE=$outdir/node_file.$NPES
+      echo "$NPES $(hostname)" | awk '{for(i=1;i<=$1;i++) print $2;}' > $MP_HOSTFILE
+      printenv | egrep ^MP_
+      ls -ltr $MP_HOSTFILE
+#      cat $MP_HOSTFILE
+    fi
+    obj=Viewer.o
+    if [[ $fast -eq 0 ]] ; then
+      if [[ ! -f $obj ]] || [[ $ODB_LIBPATH/libodbmain.a -nt $obj ]] ; then
+        $ODB_AR xv $ODB_LIBPATH/libodbmain.a $obj || {
+          obj=viewer.o
+          $ODB_AR xv $ODB_LIBPATH/libodbmain.a $obj || {
+            echo "***Error: Unable to extract viewer's main object from $ODB_LIBPATH/libodbmain.a"
+	    wait
+            exit 1
+          }
+        }
+      fi
+    fi
+#    if [[ $NPES -eq 1 ]] ; then
+#      ODB_F90=$(echo $ODB_F90 | sed 's/mpxlf/xlf/')
+#    else
+#      ODB_F90=$(echo $ODB_F90 | sed 's/\bxlf/mpxlf/')
+#    fi
+    if [[ "$viewname" = "" ]] ; then
+      defview=myview
+    else
+      defview=$viewname
+    fi
+    defpoolno=$(echo $defview | awk -F/ '{print $2}')
+    if [[ "$defpoolno" = "" ]] ; then
+      defpoolno=-1
+    fi
+    [[ $FIRST_TIME -gt 1 ]] || {
+      rm -f __input__
+      cat /dev/null > __input__
+    }
+    if [[ "$ODB_EDITOR" != pipe ]] ; then
+      if [[ $FIRST_TIME -gt 1 ]] || [[ "$viewname" = "" ]] ; then
+        repeat=0
+        while [[ $repeat -lt 1 ]]
+        do
+          echo "Enter new view name ($defview) ["." to exit] : "
+          read viewname || exit 0   # EOF (or some other error, which we ignore)
+          viewname=$(echo "$viewname" | perl -pe 's/^\s*//')
+          first=$(echo "$viewname" | cut -c1)
+          eqs=$(echo "$viewname" | perl -pe 's/^\w+\s*=.*/=/' | cut -c1)
+          if [[ "$viewname" = "" ]] ; then
+            viewname=$defview
+            ((repeat+=1))
+          elif [[ "$viewname" = "." ]] ; then
+            rm -f __input__
+            exit 0
+          elif [[ "$viewname" = "?" ]] ; then
+            pwd; ls -ltr *.sql
+          elif [[ "$first" = '!' ]] ; then
+            viewname=$(echo "$viewname" | cut -c2-)
+            [[ "$viewname" = "" ]] || eval "echo $viewname"
+          elif [[ "$first" = "\$" ]] || [[ "$eqs" = "=" ]] ; then
+            echo "$viewname" >> __input__
+          else
+            ((repeat+=1))
+          fi
+        done
+      fi
+    else
+      viewname=$defview
+    fi
+    ((FIRST_TIME+=1))
+    poolno=$(echo $viewname | awk -F/ '{print $2}')
+    if [[ "$poolno" = "" ]] ; then
+      poolno=$defpoolno
+    fi
+    suffix=$(echo $viewname | awk -F/ '{print $1}' | perl -ne 'print $1 if (/.*(\.\w+)/);')
+    viewname=$(echo $viewname | awk -F/ '{print $1}' | sed 's/\..*//')
+
+    is_table=$(echo $viewname | perl -ne 'if (m/^\@/) {print 1;} else {print 0;}')
+    if [[ $is_table -eq 1 ]] ; then
+      sqlfile=/dev/null
+    else
+      sqlfile=$viewname.sql
+    fi
+    if [[ $suggest -eq 1 && ! -f $sqlfile ]] ; then
+      cat > $sqlfile <<EOF
+CREATE VIEW $viewname AS
+    SELECT lat, lon
+//UNIQUEBY ?column_names?
+      FROM hdr
+//   WHERE ?condition?
+// ORDERBY ?column_names?
+;
+EOF
+    fi
+
+    libfile=$(pwd)/lib$dbname.a
+
+    if [[ "$suffix" != ".so" ]] || \
+       [[ $compiled = true   ]] ; then
+      was_so=0
+    else
+      was_so=1
+      testobj=$($ODB_AR t $libfile ${dbname}_$viewname.o 2>/dev/null || :)
+      if [[ "$testobj" != "${dbname}_$viewname.o" ]] ; then
+	was_so=0
+      fi
+    fi
+
+    if [[ $was_so -eq 0 ]] ; then
+      if [[ $is_table -eq 0 && "$ODB_EDITOR" != "pipe" && $query_given -eq 0 ]] ; then
+        $ODB_EDITOR $sqlfile
+      elif [[ $query_given -eq 1 ]] ; then
+        echo "$query ;" > $sqlfile
+      fi
+    fi
+
+    wait
+    [[ ! -f $errfile ]] || {
+      echo "***Error: Data layout compilation had previously failed"
+      exit 1
+    }
+
+    if [[ $fast -eq 0 && ! -f $libfile ]] ; then
+      echo "***Error: Unable to locate database library $libfile"
+      wait
+      exit 1
+    fi
+
+    if [[ $fast -eq 0 ]] ; then
+      if [[ $is_table -eq 0 && $was_so -eq 0 ]] ; then
+        odbcomp -w -l $dbname $sqlfile || exit 1
+      fi
+    fi
+
+    if [[ $is_table -eq 1 ]] ; then
+      export ODB_CONSIDER_TABLES=$(echo $viewname | perl -pe 's#\@(\w+)#/\L$1/#')
+    elif [[ -f ${dbname}_$viewname.c ]] ; then
+      # the following hassle defines you the ODB_CONSIDER_TABLES
+      eval `fgrep '#define ODB_CONSIDER_TABLES' ${dbname}_$viewname.c | awk '{print "export",$2"="$3}'`
+    else
+      export ODB_CONSIDER_TABLES='*'
+    fi
+    ODB_CONSIDER_TABLES=$(echo "$ODB_CONSIDER_TABLES" | perl -pe 'tr/A-Z/a-z/')
+    if [[ $fast -eq 0 ]] ; then
+      echo "==> ODB_CONSIDER_TABLES=$ODB_CONSIDER_TABLES"
+    fi
+
+    if [[ ! -d $dbdir/dca ]] ; then
+      dcagen=1
+    fi
+
+    if [[ $dcagen -eq 1 ]] ; then
+      if [[ "$ODB_CONSIDER_TABLES" = '*' ]] ; then
+        tables=""
+      else
+        tables=$(echo "$ODB_CONSIDER_TABLES" | perl -pe 's#/(\w+)# -t $1#g; s#/##g;')
+      fi
+      [[ ! -d $dbdir/dca ]] || mkdir $dbdir/dca
+      # dcagen -q -l $dbname $tables -F -n &
+      #-- Make for all tables, otherwise next time could be a problem
+      thisdir=$(pwd)
+      cd $dbdir
+      echo "Generating direct column access -indices. This may take a while ..."
+      dcagen -q -z -l $dbname -F -n &
+      cd $thisdir
+    elif [[ $ODB_IO_METHOD -eq 5 && -d $dbdir/dca ]] ; then 
+      # apply DCA-fix, if applicable
+      # echo "***Warning: Fixing DCA (where applicable)"
+      [[ $dcagen -ne 1 ]] || wait
+      dcafix -q $dbdir/dca/*.dca 2>/dev/null &
+    fi
+
+    if [[ $fast -eq 0 ]] ; then
+      if [[ ! -x $Exe ]] || [[ $libfile -nt $Exe ]] ; then
+        tmpExe="$Exe"
+        if [[ "$test_arch" = @(cray_*) ]] ; then
+          devshm=/dev/shm
+          if [[ -d $devshm ]] ; then
+            capakb=$(df -kl $devshm 2>/dev/null | tail -1 | awk '{print $4}')
+            if [[ $capakb -gt 40960 ]] ; then # more than 40MBytes
+              [[ -d $devshm/$USER ]] || mkdir -p $devshm/$USER
+              tmpExe=$devshm/$USER/$(basename $Exe)
+            fi
+          fi
+        fi
+        if [[ $NPES -gt 1 ]] ; then
+          odbf90mp -o $tmpExe $obj $ODB_LIB -L. -l$dbname || exit 1
+        else
+          odbf90 -o $tmpExe $obj $ODB_LIB -L. -l$dbname || exit 1
+        fi
+        if [[ "$tmpExe" != "$Exe" ]] ; then
+          \mv -f $tmpExe $Exe
+        fi
+      fi
+    fi
+
+    wait
+
+    if [[ $is_table -eq 1 ]] ; then
+      viewname="$viewname/$poolno"
+    else
+      viewname="$viewname.so/$poolno"
+    fi
+#    if [[ "$poolno" != "-1" ]] ; then
+      export ODB_PERMANENT_POOLMASK="$poolno"
+#    fi
+  fi
+fi
+
+#-- Check the need for (lat,lon) radians->degrees conversion
+kopt=""
+if [[ $fast -eq 0 ]] ; then
+  export ODB_LATLON_RAD=${ODB_LATLON_RAD:=$($ODB_FEBINPATH/latlon_rad || echo "-1")}
+else
+  export ODB_LATLON_RAD=${ODB_LATLON_RAD:="-1"}
+  if [[ $rad2deg -eq 2 ]] ; then
+    konvert_opt="-k"
+    kopt="-k"
+  fi
+fi
+
+if [[ $ODB_LATLON_RAD -eq 0 ]] ; then
+  # (lat,lon) appear already to be in degrees
+  export ODB_VIEWER_RAD2DEG=0
+elif [[ $ODB_LATLON_RAD -eq 1 ]] ; then
+  # (lat,lon) appear to be in radians
+  if [[ $rad2deg -eq 2 ]] ; then # -k command line flag was used : plot & text (lat,lon) will be in degrees
+    export ODB_VIEWER_RAD2DEG=2
+    konvert_opt="-k"
+    kopt="-k"
+  else
+    export ODB_VIEWER_RAD2DEG=1
+  fi
+else # Anything else 
+#-- Automagic radians to degree conversion needed for coverage plots ?
+  if [[ $rad2deg_zeroed -eq 1 ]] ; then # -R used ==> overrides everything in 1st place
+    export ODB_VIEWER_RAD2DEG=0
+    konvert_opt="-R"
+    kopt=""
+  elif [[ $rad2deg -eq 0 ]] ; then
+    if [[ "$ODB_VIEWER_RAD2DEG" = "" ]] ; then
+      if [[ "$dbname" = "ECMA" || \
+            "$dbname" = "CCMA" || \
+            "$dbname" = "ECMASCR" ]] ; then
+        export ODB_VIEWER_RAD2DEG=1
+      fi
+    fi
+  elif [[ $rad2deg -eq 2 ]] ; then # -k command line flag was used : plot & text (lat,lon) will be in degrees
+    export ODB_VIEWER_RAD2DEG=2
+    konvert_opt="-k"
+    kopt="-k"
+  else # -r command line flag was used ==> overrides everything
+    export ODB_VIEWER_RAD2DEG=1
+    konvert_opt="-r"
+    kopt=""
+  fi
+fi
+
+#-- Poolmask
+if [[ "$poolmask" != "" ]] ; then
+  poolmask=$(echo $poolmask | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g')
+  export ODB_PERMANENT_POOLMASK="$poolmask"
+  echo "==> Using only pools : $ODB_PERMANENT_POOLMASK"
+  poolmask_arg="-p $poolmask"
+else
+  poolmask_arg=""
+fi
+
+#-- Append (lat,lon)'s to the end of existing plotfile ?
+export ODB_VIEWER_PLOTFILE_APPEND=$append
+
+#-- Plot immediately ?
+export ODB_PLOTTER=${ODB_PLOTTER:=0}
+if [[ $plot_immed -eq 1 ]] ; then # Essentially: Add the -s(how) option to plotobs.x
+  export ODB_PLOTTER=$(echo $ODB_PLOTTER | sed 's/ -b/ -s -b/')
+fi
+
+if [[ "$ODB_EDITOR" = "pipe" ]] ; then # strip out the possible -s from pipe/batch mode
+  export ODB_PLOTTER=$(echo $ODB_PLOTTER | perl -pe 's/-s\b//g')
+fi
+
+if [[ "$plot_area" != "" ]] ; then
+  export ODB_PLOTTER=$(echo $ODB_PLOTTER | sed "s/ -b/ -a'$plot_area' -b/")
+fi
+
+if [[ "$plot_proj" != "" ]] ; then
+  export ODB_PLOTTER=$(echo $ODB_PLOTTER | sed "s/ -b/ -p$plot_proj -b/")
+fi
+
+if [[ "$plot_opt" != "" ]] ; then
+  export ODB_PLOTTER=$(echo $ODB_PLOTTER | sed "s/ -b/ $plot_opt -b/")
+fi
+
+if [[ "$warrow" = "w" ]] ; then
+  export ODB_PLOTTER=$(echo $ODB_PLOTTER | sed "s/ -b/ -W -b/")
+fi
+
+if [[ "$ODB_VIEWER_COLOR_MAP_FILE" != "" ]] ; then
+# Color map file MUST have a suffix ".cmap"
+  ODB_VIEWER_COLOR_MAP_FILE="$(dirname $ODB_VIEWER_COLOR_MAP_FILE)/$(basename $ODB_VIEWER_COLOR_MAP_FILE .cmap).cmap"
+  if [[ ! -f $ODB_VIEWER_COLOR_MAP_FILE ]] ; then
+    tmp=$(basename $ODB_VIEWER_COLOR_MAP_FILE)
+    if [[ -f $ODB_SYSPATH/$tmp ]] ; then
+      export ODB_VIEWER_COLOR_MAP_FILE=$ODB_SYSPATH/$tmp
+    fi
+  fi
+  if [[ ! -f $ODB_VIEWER_COLOR_MAP_FILE ]] ; then
+    echo "***Warning: Cannot locate color map file '$ODB_VIEWER_COLOR_MAP_FILE'"
+    unset ODB_VIEWER_COLOR_MAP_FILE
+  else
+    echo "*** Using color map file '$ODB_VIEWER_COLOR_MAP_FILE'"
+  fi
+fi
+
+[[ "$ODB_GHOSTVIEW" = "" ]] && export ODB_GHOSTVIEW="ghostview -land"
+
+#[[ "$ODB_BINARY_CHUNKSIZE" = "" ]] && export ODB_BINARY_CHUNKSIZE=0
+[[ "$OMP_NUM_THREADS" = "" ]] && export OMP_NUM_THREADS=1
+
+ncpus=$OMP_NUM_THREADS
+OMP_NUM_THREADS=$(echo "$OMP_NUM_THREADS" | perl -pe 's/^(\d+).*/$1/')
+
+size=$((memsize*1024))
+#echo "memsize=${memsize}MBytes, size=${size}KBytes"
+ulimit -c 0 2>/dev/null || :
+#-- commented out since on some (linux) systems cause serious problems
+#ulimit -d $size || :
+#ulimit -s $size || :
+#ulimit -m $size || :
+[[ "$test_arch" = @(linux|aix|solaris|nec*|cray_*) ]] || ulimit -v $size 2>/dev/null || :
+if [[ $fast -eq 0 && "$ODB_EDITOR" != "pipe" ]] ; then
+  if [[ "$test_arch" = @(linux|aix|solaris|cygwin|nectx|cray_*) ]] ; then
+    ulimit -a 2>/dev/null || :
+  else
+    limit 2>/dev/null || :
+  fi
+fi
+
+export ODB_RLDPATH="$dbdir:${ODB_RLDPATH}"
+#export ODB_COMPILER="$ODB_COMPILER -v"
+
+if [[ $trace -eq 1 ]] ; then
+  export ODB_TRACE_PROC=-1
+  tracename=$(echo $viewname | sed 's#/.*##; s#\..*##')
+  export ODB_TRACE_FILE=$tracename.%d
+  export ODB_TRACE_FLUSH_FREQ=1000
+  echo "***Warning: ODB-tracing is ON and goes to file(s) $ODB_TRACE_FILE"
+fi
+
+#printenv | grep ^ODB_ | sort
+
+if [[ "$ARCH" = "hppa" ]] ; then
+  rm -f ftn00 || :
+  ln -s /dev/tty ftn00 || :
+fi
+
+cd $outdir || {
+	echo "***Error: Cannot cd to output directory outdir='$outdir'"
+	wait
+	exit 3
+}
+
+abort=no
+if [[ $fast -eq 1 ]] ; then
+  #-- This uses the new fast odbsql for fetching data & doing the plotting
+
+  vw=$(echo $viewname | sed 's/\..*//')
+
+  #-- Generating report  
+  if [[ "$ODB_REPORTER" != "0" ]] ; then
+    add="$kopt $bar_onoff -o $vw.rpt"
+    if [[ X"${DISPLAY:-}" != X ]] ; then
+      add="$add -X" # Means here: report window will be created
+    fi
+    if [[ "$debugger" = "" ]] ; then
+      $ODB_BINPATH/odbsql -v $vw.sql -f odb -i $dbdir/$dbname.sch -n $ncpus $poolmask_arg $add || touch $errfile &
+    else
+      $ODB_BINPATH/odbsql -v $vw.sql -f odb -i $dbdir/$dbname.sch $poolmask_arg $add -D $debugger
+      exit 1
+    fi
+  fi
+
+  #-- Generating plot
+  if [[ "$ODB_ARCH" = "nectx" ]] ; then
+    export ODB_PLOTTER=0 # for now
+  fi
+
+  if [[ "$ODB_PLOTTER" != "0" ]] ; then
+    add="$kopt -o $vw.obs$gz"
+    if [[ X"${ODB_VIEWER_COLOR_MAP_FILE:-}" != X ]] ; then
+      if [[ -f "${ODB_VIEWER_COLOR_MAP_FILE}" ]] ; then
+        add="$add -C ${ODB_VIEWER_COLOR_MAP_FILE}"
+      fi
+    fi
+    if [[ $plot_immed -eq 1 ]] ; then
+      add="$add -X"  # Means here: plot immediately --> $DISPLAY-screen
+    fi
+
+    if [[ "$ODB_REPORTER" != "0" ]] ; then
+      sleep 1 # Delay start i.e. favoring the report generator over plotting
+      add="$add -B"
+    else
+      add="$add $bar_onoff" # Enable progress bar, unless -B given (or -e batch|pipe)
+    fi
+    if [[ "$debugger" = "" ]] ; then
+      $ODB_BINPATH/odbsql -v $vw.sql -f ${warrow}plotobs -i $dbdir/$dbname.sch $poolmask_arg $add || touch $errfile &
+    else
+      $ODB_BINPATH/odbsql -v $vw.sql -f ${warrow}plotobs -i $dbdir/$dbname.sch $poolmask_arg $add -D $debugger
+      exit 2
+    fi
+  fi
+
+  wait 
+  if [[ ! -f $errfile && "$ODB_EDITOR" != "pipe" ]] ; then
+    exec $cmd -i $dbdir -o $outdir -v $vw.sql -n $ncpus -s $memsize -V $poolmap \
+         $f_layout $poolmask_arg $suggest_arg $trace_arg $konvert_opt \
+         $fastopt $bar_onoff_opt $gzopt $dbname
+  fi
+elif [[ "$debugger" = "" ]] ; then
+   export ODB_WILL_PAUSE=0
+   if [[ $NPES -gt 1 ]] ; then
+     if [[ "$test_arch" = @(linux|solaris|cygwin|nectx|cray_*) ]] ; then
+       Exe="mpirun.linux -np $NPES $Exe"
+     fi
+   else
+     if [[ "$test_arch" = @(cray_*) ]] ; then
+       Exe="mpirun.linux -np $NPES $Exe"
+     fi
+   fi
+   rm -f $errfile
+   cat __input__ > __real_input__ 2>/dev/null || :
+   echo "$viewname" >> __real_input__
+   if [[ "$drhookopt" != "" ]] ; then
+     export DR_HOOK=true
+     export DR_HOOK_OPT="$drhookopt"
+   fi
+   do_cmd="$Exe $dbname . $viewname $poolmap"
+   if [[ "$ODB_ARCH" = "nectx" ]] ; then
+     jobname=$(echo "$viewname" | sed 's|[./].*||')
+     cat <<EOF | odbqsub -N $jobname || touch $errfile
+export ODB_VIEWER_INFORM_PROGRESS=0
+export ODB_EDITOR=pipe
+rm -f $errfile
+$do_cmd < __real_input__ || touch $errfile
+[[ ! -f $errfile ]] || exit 1
+[[ __real_input__ -nt $jobname.rpt ]] || head -15 $jobname.rpt || :
+EOF
+   else  
+     env ODB_EDITOR=pipe $do_cmd < __real_input__ || touch $errfile
+   fi
+#   pid=$!
+#   trap "sleep 2; kill $pid" 1 2 3 15
+#   wait $pid   
+   rm -f $MP_HOSTFILE 2>/dev/null
+   if [[ ! -f $errfile && "$ODB_EDITOR" != "pipe" ]] ; then
+     rm -f __real_input__
+     if [[ $was_so -eq 0 ]] ; then
+       viewname=$(echo $viewname | sed 's/\.so//')
+     fi
+     exec $cmd -i $dbdir -o $outdir -v $viewname -n $ncpus -s $memsize -V $poolmap \
+          $f_layout $poolmask_arg $suggest_arg $trace_arg $konvert_opt \
+          $fastopt $bar_onoff_opt $gzopt $dbname
+   fi
+# else
+#   $Exe $dbname . $viewname $poolmap || abort=yes
+# fi
+else
+  export ODB_ERRTRA=0
+  echo "Using debugger '$debugger'"
+  echo 'Use the following arguments: '$dbname' . " " '"$viewname $poolmap"
+  $debugger $Exe
+fi
+
+rm -f  __input__
+
+rm -f $MP_HOSTFILE 2>/dev/null
+
+if [[ "$abort" = "yes" ]] ; then
+  if [[ -f RecoverY && "$ODB_EDITOR" != "pipe" ]] ; then
+    viewname=$(head -1 RecoverY | sed 's/ //g')
+    exec $cmd -i $dbdir -o $outdir -v $viewname -n $ncpus -s $memsize -V $poolmap \
+         $f_layout $poolmask_arg $suggest_arg $trace_arg \
+         $fastopt $bar_onoff_opt $gzopt $dbname
+  else
+    echo "***Error: Cannot automatically recover from error(s)"
+    exit 1
+  fi
+fi
+
+exit 0

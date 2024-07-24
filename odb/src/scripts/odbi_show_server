@@ -1,0 +1,82 @@
+#!/bin/ksh
+#begin
+#
+# Show running odbi_server.x's started by the username and/or by others
+#
+# Usage: odbi_show_server [-u username] [-x server_exe] [-h hostname]
+#
+# Note:  -h hostname can be supplied multiple times to monitor many hosts e.g.:
+#
+#        -h hpce -h bee04 -h ecgate
+# 
+# If -h hostname are given as the last argument(s), then -h's can be left out :
+#        
+#           hpce    bee04    ecgate
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 06-Dec-2007
+#
+
+set -eu
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+user=""
+exe=odbi_server.x
+host=""
+
+FLAGS=x:u:h:
+
+abort=no
+
+while getopts ${FLAGS} i
+do
+  case $i in
+	x)	exe="$OPTARG";;
+	u)	user="$OPTARG";;
+	h)	host="$host$OPTARG ";;
+	*) 	abort=yes; break;;
+	\?)     abort=yes; break;;
+  esac
+done
+
+#-- Abort, if necessary
+
+if [[ $abort = yes ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 1
+fi
+
+shift $(expr $OPTIND - 1)
+
+if [[ $# -gt 0 ]] ; then
+  host="$host$*"
+fi
+
+if [[ "$host" = "" ]] ; then
+  host="localhost"
+fi
+
+set +e
+exec 2>/dev/null
+
+for h in $host
+do
+  ip_addr=$($ODB_FEBINPATH/odbi_host.x "$h" || echo '0')
+  if [[ "$ip_addr" != "0" ]] ; then
+    if [[ "$h" = "localhost" ]] ; then
+      prefix=""
+    else
+      prefix="/usr/bin/rsh $h"
+    fi
+    if [[ "$user" != "" ]] ; then
+      cmd="$prefix ps -fu $user"
+    else
+      cmd="$prefix ps -fe"
+    fi
+    $cmd | fgrep "$exe" | fgrep -v grep | perl -pe 's/^(\s*)/'"$h\($ip_addr\)"': /; s/\s+/ /g; s/$/\n/;'
+  fi
+done
+
+exit 0

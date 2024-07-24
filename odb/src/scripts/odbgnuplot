@@ -1,0 +1,354 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15 
+#begin
+#
+#Usage: odbgnuplot [OPTION]... [SQLfile]...
+#                  -l dbname                        : by default automatically detected
+#                  -v viewname_or_tablename         : default=myview ; could be a table name, say: @hdr
+#                  -q 'select statement'            : supply ODB/SQL query directly (by default implies -v myview)
+#                  -s starting_row                  : default=1 (counting starts from the first active pool)
+#                  -n max_number_of_rows_to_display : default=-1 ; if -1 --> unlimited)
+#                  -a                               : display all rows (same as -n -1)
+#                  -b row_buffer_size               : default=1000 ; if -1 --> no. of rows in each pool)
+#                  -E                               : Use the same -s & -n & -b option for Every pool separately
+#                  -p poolmask(s)                   : default=-1 i.e. all pools included; f.ex.: -p 1 -p1-4 -p1,3,6
+#                  -k                               : konvert (lat,lon) to degrees
+#                  -c                               : force re-creation of lib<dbname>.a
+#                  -d "options"                     : run also dcagen with these options
+#                  -5                               : do NOT use fast I/O-method=5, even if desirable
+#                  -f output_file                   : Save displayed data on file output_file, too
+#                  -T                               : set ODB tracing on
+#                  -g                               : Enable debugging output go to stderr.out
+#                  -D debugger                      : Run tool under debugger (default=none)
+#                  -0                               : (zero) ignore stderr (by default written to stderr.out)
+#                  -H dr_hook_opt                   : Enable Dr.Hook profiler and export DR_HOOK_OPT with dr_hook_opt
+#                  -h                               : Print help/usage and abort
+#
+#                  -x xlabel                        : x-label (if empty --> 1st SELECT-column of the SQL)
+#                  -y ylabel                        : y-label (if empty --> 2nd SELECT-column of the SQL)
+#                  -z zlabel                        : z-label (if empty --> 3rd SELECT-column of the SQL; implies "splot")
+#                  -w 'from table where ...'        : from|from+where|from+where+orderby|from+orderby|where|where+orderby|orderby
+#                  -t                               : set x-label to date/time
+#
+# (... under development ...)
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 09-May-2006 ; based on odbless-script
+#
+
+set -eu
+
+export SHELL=/bin/ksh
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+basecmd=$(basename $cmd)
+
+thisdir=$(pwd)
+cd $thisdir
+
+: ${dbname:=}
+: ${dbdir:=${thisdir}}
+: ${views:=}
+: ${viewname_given:=0}
+: ${start:=1}
+: ${limit:=-1}
+: ${rowbuf:=100000}
+: ${poolmask:=}
+: ${stderr:=stderr.out}
+: ${query:=}
+: ${query_given:=0}
+: ${dcagen_opt:=}
+: ${io_method:=5}
+: ${recompile:=0}
+: ${konvert:=0}
+: ${output:=}
+: ${trace:=0}
+: ${debug:=0}
+: ${debugger:=}
+: ${drhookopt:=}
+: ${every:=0}
+: ${where:=}
+: ${plotting:=plot}
+: ${minx:=}
+: ${maxx:=}
+: ${miny:=}
+: ${maxy:=}
+: ${minz:=}
+: ${maxz:=}
+: ${rotate_x:=}
+: ${rotate_z:=}
+: ${timefmt:=}
+: ${title:=}
+: ${terminal:=}
+: ${styles:=points}
+: ${xdata:=}
+: ${xlabel:=}
+: ${ylabel:=}
+: ${zlabel:=}
+: ${EXE:=./odbgnuplot.x}
+: ${FILTER:=}
+
+: ${ODB_BINPATH:=}
+: ${ODB_LIBPATH:=}
+
+: ${ftime:=$ODB_BINPATH/time.awk}
+: ${anime:=}
+
+: ${GNUPLOT:="gnuplot -persist"}
+: ${MAKEGP:=$ODB_BINPATH/makegp.ksh}
+
+FLAGS=ab:cd:ED:f:ghH:kl:n:p:q:s:Ttv:05x:y:z:w:
+
+abort=no
+while getopts ${FLAGS} i
+do
+  case $i in
+  a) limit="-1";;
+  b) rowbuf="$OPTARG";;
+  c) recompile=1;;
+  d) dcagen_opt="$OPTARG";;
+  D) debugger="$OPTARG";;
+  E) every=1;;
+  f) output="$OPTARG";;
+  g) debug=1;;
+  h) abort=yes; break;;
+  H) drhookopt="$OPTARG";;
+  k) konvert=1;;
+  l) dbname="$OPTARG";;
+  n) limit="$OPTARG";; 
+  p) poolmask="$poolmask $OPTARG";;
+  q) query_given=1; query="$OPTARG";;
+  s) start="$OPTARG";;
+  T) trace=1;;
+  t) xlabel="date/time";;
+  v) views="${views:+${views} }${OPTARG}"; viewname_given=1;;
+  0) stderr="/dev/null";;
+  5) io_method=-1;; # Setting this to a <=0 value will ensure I/O-method 5 will NOT be used
+                    # If > 0, there is an automatic test for READ/ONLY databases, whether ./dca
+                    # directory exists. But keeping I/O-method <= 0 bypasses this testing
+  x) xlabel="$OPTARG";;
+  y) ylabel="$OPTARG";;
+  z) zlabel="$OPTARG"; plotting=splot;;
+  w) where="$OPTARG";;
+  *) abort=yes; break;;
+  esac
+done
+
+shift `expr ${OPTIND} - 1`
+
+files=${*:-}
+: ${views:=myview}
+
+if [ -z "${output}" ]; then
+    case ${terminal} in
+        postscript*) output=./`echo ${views} | sed -e 's/ /_/g'`.ps ;;
+    esac
+fi
+
+case $(echo "${xlabel}" | perl -pe 'tr/A-Z/a-z/') in
+    date | date@hdr)
+        timefmt="%Y%m%d"
+        xdata=time
+        ;;
+    time | time@hdr)
+        timefmt="%H%M%S"
+        xdata=time
+        ;;
+    date/time)
+        FILTER="awk -f ${ftime}"
+        timefmt="%Y%m%d/%H%M%S"
+        xdata=time
+        ;;
+esac
+
+if [[ "$abort" = "no" && "$dbname" = "" ]] ; then
+  dbname=$(basename $(\ls -C1 *.dd 2>/dev/null | head -1) .dd || echo "")
+  if [[ "$dbname" = ".dd" ]] ; then
+    dbname=""
+    abort=yes
+  fi
+fi
+
+if [[ "$abort" = "no" && "$debugger" != "" ]] ; then
+  typeset test=$(whence "$debugger" 2>/dev/null || echo "")
+  if [[ "$test" = "" ]] ; then
+    echo "***Error: Unable to locate debugger '$debugger'"
+    abort=yes
+  else
+    debugger=$test
+  fi
+fi
+
+if [[ "$abort" = "yes" ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//'
+  exit 1
+fi
+
+if [[ -d "$dbname" ]] ; then
+  dbdir=$(\cd $dbname 2>/dev/null ; pwd)
+  dbname=$(basename "$dbname" | perl -pe 's/\..*//; tr/a-z/A-Z/')
+fi
+
+is_table=$(echo "$views" | perl -ne 'if (m/^\@/) {print 1;} else {print 0;}')
+test $is_table -eq 1 && files=/dev/null
+
+cd $dbdir
+
+if [[ $is_table -eq 0 ]] ; then # Is not a table
+  if [[ $query_given -eq 0 && $viewname_given -eq 0 && -z "${files}" && \
+        "$xlabel" != "" && "$ylabel" != "" ]] ; then
+
+    case $(echo "${xlabel}" | perl -pe 'tr/A-Z/a-z/') in
+        date/time) query="SELECT date@hdr, time@hdr, ${ylabel}" ;;
+        *)  query="SELECT $xlabel, $ylabel" ;;
+    esac
+
+    [[ "$zlabel" = "" ]] || query="$query, $zlabel";
+    [[ "$where"  = "" ]] || query="$query  $where";
+    query="$query;"
+    query_given=1
+  fi
+  if [[ $query_given -eq 1 ]] ; then
+    files=./${views}.sql
+    echo "$query" > ${files}
+  fi
+fi
+
+#if [[ ! -f "${EXE}" ]]; then
+    if [[ ! -f lib$dbname.a ]] || \
+       [[ ! -f $dbname.ddl_ ]] || \
+       [[ ! -f ${dbname}.h  ]] || \
+       [[ $ODB_FEBINPATH/odb98.x -nt $dbname.ddl_ ]] || \
+       [[ $dbname.ddl -nt $dbname.ddl_ ]] ; then
+      recompile=1
+    fi
+#fi
+
+if [[ $recompile -eq 1 ]] ; then
+  odbcomp -z $dbname.sch
+fi
+
+if [[ "$dcagen_opt" != "" ]] ; then
+  dcagen -F $dcagen_opt
+fi
+
+if [[ $is_table -eq 0 && "${files}" != "/dev/null" && -n "${files}" ]] ; then
+  odbcomp -l$dbname -w ${files}
+fi
+
+#echo "views=$views" 1>&2
+if [[ $is_table -eq 1 ]] ; then
+  export ODB_CONSIDER_TABLES=$(echo $views | perl -pe 's#\@(\w+)#/\L$1/#')
+elif [[ -f ${dbname}_$views.c ]] ; then
+  # the following hassle defines you the ODB_CONSIDER_TABLES
+  eval `fgrep '#define ODB_CONSIDER_TABLES' ${dbname}_$views.c | awk '{print "export",$2"="$3}'`
+else
+  export ODB_CONSIDER_TABLES='*'
+fi
+ODB_CONSIDER_TABLES=$(echo "$ODB_CONSIDER_TABLES" | perl -pe 'tr/A-Z/a-z/')
+#echo "==> ODB_CONSIDER_TABLES=$ODB_CONSIDER_TABLES" 1>&2
+
+if [[ "$poolmask" != "" ]] ; then
+  poolmask=$(echo $poolmask | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g')
+  export ODB_PERMANENT_POOLMASK="$poolmask"
+  #echo "==> ODB_PERMANENT_POOLMASK=$ODB_PERMANENT_POOLMASK" 1>&2
+fi
+
+if [[ -f Odbgnuplot.F90 ]] ; then
+  if [[ ! -f Odbgnuplot.o ]] || [[ Odbgnuplot.F90 -nt Odbgnuplot.o ]] ; then
+    odbf90 -c Odbgnuplot.F90
+  fi
+fi
+
+if [[ $recompile -eq 1 ]] || \
+   [[ ! -f ${EXE} ]] || \
+   [[ lib$dbname.a -nt ${EXE} ]] || \
+   [[ $ODB_LIBPATH/libodbmain.a -nt ${EXE} ]] ; then
+  obj=$($ODB_AR t $ODB_LIBPATH/libodbmain.a | grep Odbgnuplot)
+  $ODB_AR x $ODB_LIBPATH/libodbmain.a $obj
+  odbf90 $obj -l$dbname -o ${EXE}
+  rm -f $obj
+fi
+
+export ODB_LAT=${ODB_LAT:="lat@hdr"}
+export ODB_LON=${ODB_LON:="lon@hdr"}
+export ODB_LATLON_RAD=$($ODB_FEBINPATH/latlon_rad 2>/dev/null || echo "-1")
+
+#-- I/O-method
+ddfile=$dbdir/$dbname.dd
+if [[ -s $ddfile ]] ; then
+  iom=$(head -1 $ddfile | awk 'BEGIN {n=1;} {if (NF >= 3) n=$3;} END {print n;}')
+else
+  iom=1
+fi
+
+#-- remove possible file (not dir) $dbdir/dca, and if not successful then possible *empty* $dbdir/dca dir
+\rm $dbdir/dca 2>/dev/null || rmdir $dbdir/dca 2>/dev/null || :
+
+export ODB_IO_METHOD=${ODB_IO_METHOD:=$io_method}
+if [[ $io_method -eq 5 && ! -d $dbdir/dca ]] ; then
+#  ODB_IO_METHOD=$iom
+  ODB_IO_METHOD=0 # for now
+fi
+
+export ODB_REPORTER=stdout
+export ODB_PRINT_COLON="#"
+
+args=
+for view in ${views}
+do
+    args="${args:+${args} }\"< ${EXE} 0 $dbname ${view} $start $limit $rowbuf $konvert $every $debug 2>>$stderr ${FILTER:+| ${FILTER}}\""
+done
+
+if [[ "$debugger" = "" ]] ; then
+  if [[ $trace -eq 1 ]] ; then # turn ODB-tracing on
+    export ODB_TRACE_PROC=-1
+    export ODB_TRACE_FILE=trace.%d
+    export ODB_TRACE_FLUSH_FREQ=1
+  fi
+
+  if [[ "$drhookopt" != "" ]] ; then
+    export DR_HOOK=true
+    export DR_HOOK_OPT="$drhookopt"
+  fi
+
+  eval \
+  minx=${minx} \
+  maxx=${maxx} \
+  miny=${miny} \
+  maxy=${maxy} \
+  minz=${minz} \
+  maxz=${maxz} \
+  output=${output} \
+  plotting=${plotting} \
+  postload=${anime} \
+  regexp=\'5\' \
+  rotate_x=${rotate_x} \
+  rotate_z=${rotate_z} \
+  styles=\"${styles}\" \
+  terminal=\"${terminal}\" \
+  title=\"${title}\" \
+  timefmt=\"${timefmt}\" \
+  xdata=${xdata} \
+  xlabel=\"${xlabel}\" \
+  ylabel=\"${ylabel}\" \
+  zlabel=\"${zlabel}\" \
+  ${MAKEGP} ${args} | eval ${GNUPLOT}
+
+  # Wanna run it ? Remove the '#' below
+  # eval  $cmd2
+
+else # Run under $debugger
+
+  cmdargs="1 $dbname $views $start $limit $rowbuf $konvert $every $debug"
+
+  echo "Using debugger '$debugger'"
+  echo "Use the following arguments: $cmdargs"
+  
+  $debugger ${EXE}
+
+  exit 1
+fi
+
+exit 0

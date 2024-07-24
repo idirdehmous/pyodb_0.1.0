@@ -1,0 +1,53 @@
+#!/bin/ksh
+#
+# Introduces new database(s) and creates static linking "glue" for use by 
+#
+# Usage: newodb [-z] [dbname1] [dbname2] ... [dbnameN] 
+#
+# Author: Sami Saarinen, ECMWF, 2003-2006
+#
+#
+
+echo "Running: $0 $*"
+
+if [[ $# -lt 1 ]] ; then
+  head -6 $0 | tail -5
+  exit 1
+fi
+
+set -eu
+
+empty_tables=""
+
+if [[ "$1" = "-z" ]] ; then
+  empty_tables="-z"
+  shift
+fi
+
+errflg=0
+for arg in $*
+do
+  db=$(basename $arg | perl -pe 's/\s+//g; s/\..*$//; s/[_-]//g; tr/a-z/A-Z/')
+  if [[ ! -f $db.ddl && ! -f $db.sch ]] ; then
+    echo "***Error: Unable to locate data layout or schema file ($db.ddl/$db.sch) for db=$db"
+    errflg=1
+  elif [[ -f $db.ddl ]] ; then
+    odbcomp $empty_tables -l $db $db.ddl
+  elif [[ -f $db.sch ]] ; then
+    odbcomp $empty_tables -l $db $db.sch
+  fi
+done
+
+if [[ $errflg -eq 1 ]] ; then
+  exit 3
+fi
+
+create_odbglue $*
+
+odbglue=_odb_glue.c
+odbglue_o=_odb_glue.o
+
+if [[ ! -f $odbglue_o ]] || [[ $odbglue -nt $odbglue_o ]] ; then
+  echo odbcc -c $odbglue
+  exec odbcc -c $odbglue
+fi

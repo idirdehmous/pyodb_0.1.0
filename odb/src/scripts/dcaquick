@@ -1,0 +1,160 @@
+#!/bin/ksh
+#begin
+#
+# Usage: dcaquick
+#
+# Creates dca/-dir from multiple database w/o reading the actual
+# data, but figuring out it from the existing databases.
+#
+# Currently the existing dca-files must be in text (not binary) format
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 13-Nov-2006
+#
+
+set -eu
+
+thisdir=$(pwd)
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+perl=$(whence perl 2>/dev/null || echo "perl")
+awk=$(whence awk 2>/dev/null || echo "awk")
+mysort=$ODB_FEBINPATH/mysort
+
+if [[ X"${ARCH:-}" = X ]] ; then
+  export ARCH=unknown
+fi
+test_arch=$(test_arch 2>/dev/null || echo "$ARCH")
+
+export ODB_PARAL=${ODB_PARAL:=3}
+paral=$ODB_PARAL
+
+abort=no
+
+#-- Determine database name (assuming you're in the (virtual) database dir right now)
+dbname=$(basename $(\ls -C1 *.dd 2>/dev/null | head -1) .dd || echo "")
+if [[ "$dbname" = ".dd" ]] ; then
+  echo "***Error: Unable to locate the main metadata file (.dd)"  >&2
+  dbname=""
+  abort=yes
+fi
+
+if [[ "$abort" = "yes" ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//' >&2
+  exit 1
+fi
+
+#-- More general case: Many dca-dirs
+
+#dirs=$(exec 2>/dev/null; \ls -ld [0-9]* | egrep "^l" | $awk '{print $NF}' | xargs -n1 dirname | sort -u || :)
+dirs=$(exec 2>/dev/null; \ls -ld [0-9]* | egrep "^l" |\
+       $awk '{print $NF}' |\
+       $perl -pe 's#/\w+[/]?$#/#;s#(\S+)/$#\1#;s#^\w+$#.#' | $mysort -u |\
+       $perl -pe 's/\s+/ /g' || :)
+
+# If any input database dirs hasn't got the dca/ directory, then
+# create global dca/ over all the given databases into the current dir and exit
+
+create_dca=0
+for dbdir in $dirs
+do
+  if [[ -d $dbdir && ! -d $dbdir/dca ]] ; then
+    create_dca=1
+    break
+  fi
+done
+
+if [[ $create_dca -eq 1 ]] ; then
+  dcagen -q -P -F -n -z
+  exit 0
+fi
+
+# Temporary dca-dir
+export TMPDIR=${TMPDIR:=/tmp}
+
+if [[ "$test_arch" = linux && -d /dev/shm ]] ; then
+  # Prefer to use RAM-disk (/dev/shm) when available
+  tmpdir=/dev/shm
+elif [[ -d "$TMPDIR" ]] ; then
+  tmpdir=$TMPDIR
+else
+  tmpdir=/tmp
+fi
+
+dcatmp=$tmpdir/dcatmp.$$
+\rm -rf $dcatmp
+mkdir -p $dcatmp
+
+# Obtain "true_pooldir;virtual_pooldir;" -pairs from "dada"
+# Assuming ls -ld gives links as follows:
+# lrwxrwxrwx  1 mps rd 47 Aug 24  2006 993 -> /hugetmp/mps/era_interim/1111/1988121612/CCMA/1
+# ==> "true_pooldir;virtual_pooldir;" becomes :
+# /hugetmp/mps/era_interim/1111/1988121612/CCMA/1;993;
+
+mapfile=$dcatmp/map.$$
+\ls -ld [0-9]* 2>/dev/null | egrep "^l" | $awk '{print $NF";"$(NF-2)";"}' > $mapfile || : &
+
+#-- create dca/-dir
+(\rm -rf dca ; mkdir dca) &
+
+# Tables (ordered; most often [thus normally the biggest] table occurring first)
+ddfile=$dbname.dd
+#tables=$(egrep "^@" $ddfile | $awk '{print $1}' | $perl -pe 's#\@# #g;')
+tables=$(\ls -C1m [0-9]* |\
+         $perl -pe 's/^\s*$//; s/:\n/ /; s/,\s*/ /g; s/^\d+\s+//; s/\s+/\n/g' |\
+         $mysort | uniq -c | $mysort -nr | $awk '{print $2}')
+
+procfile=$dcatmp/procfile.$$
+cat > $procfile <<EOF
+#!/bin/ksh
+set -eu
+t=\$1 # table name
+has_captured=0
+dcafile_out=$dcatmp/\$t.dca
+#-- To hold the capture of the 1st dca-line
+capture=$dcatmp/LINE1.\$t
+cat /dev/null > \$dcafile_out
+#-- dbdir = the original database directory in concern (e.g. /hugetmp/mps/era_interim/1111/1988121612/CCMA/)
+for dbdir in $dirs  
+do
+  dcafile_in=\$dbdir/dca/\$t.dca
+  if [[ -s \$dcafile_in ]] ; then
+    if [[ \$has_captured -eq 0 ]] ; then
+      head -1 \$dcafile_in > \$capture
+      has_captured=1
+    fi
+    #-- tpd = true_pooldir
+    for tpd in \$($awk '{if (NR > 1) print \$5}' \$dcafile_in | $mysort -u | $awk -F/ '{print \$1}')
+    do
+      #-- vpd = virtual_pooldir
+      vpd=\$($perl -ne 's/^.*;(\d+);/\$1/, print if (m#'"^\${dbdir}/\${tpd};"'#)' < $mapfile)
+      $perl -ne 's#(^.*)\s+'\$tpd/\$t'\s+(\d+)\s+(.*)#sprintf("%s %d/%s %d %s",\$1,'\$vpd,'"'\$t'",\$2+'\$vpd-\$tpd',\$3)#e, print if (m#'" \$tpd/\$t "'#)' < \$dcafile_in >> \$dcafile_out || :  
+    done
+  fi
+done
+#-- sort (as in dcagen)
+if [[ \$has_captured -eq 1 ]] ; then
+  cat \$capture > dca/\$t.dca
+  $perl -pe 's/ 2147483647 -2147483647 / 1 -1 /' < \$dcafile_out | $mysort -n +0 +5 >> dca/\$t.dca
+fi
+EOF
+
+chmod u+rx $procfile
+
+cmdfile=$dcatmp/cmdfile.$$
+cat /dev/null > $cmdfile
+
+for t in $tables
+do
+  echo "$procfile $t" >> $cmdfile
+done
+
+wait
+
+nmaxcmd=$(wc -l $cmdfile)
+env ODB_PARAL=$paral $ODB_FEBINPATH/fscheduler.x $nmaxcmd >/dev/null 2>/dev/null
+
+\rm -rf $dcatmp
+
+exit 0

@@ -1,0 +1,5 @@
+Temperature (in F)
+obsvalue@body
+220 320
+1,1.8,-459.67 ! Method=1 --> Scaling: 1.8 * K - 459.67
+

@@ -1,0 +1,110 @@
+#!/bin/csh -f
+#
+# A script to create shareable view objects out of permanent view objects
+# stored in $ODB_LIBPATH/lib<dbname>.a.
+#
+# By supplying optional arguments, the specific view(s) can be extracted.
+#
+# Assumes that both ODB_SYSPATH and ODB_LIBPATH exist.
+#
+# Objects are created into the current directory.
+#
+# Usage: odbvlink DATABASE_NAME [view_name(s)]
+#
+# Author: Sami Saarinen, ECMWF, 1998-99
+#
+
+if ( $#argv < 1 ) then
+  echo "Usage: odbvlink DATABASE_NAME [view_name(s)]"
+  exit 1
+endif
+
+set dbname=$1
+
+if ( $#argv > 1 ) then
+  shift
+  set views="$*"
+  set views=`echo $views | sed 's/ /,/g'`
+else
+  set views=""
+endif
+
+
+set rc=0
+if ( $?ODB_LIBPATH == 0) then
+  echo "*** Error: ODB_LIBPATH must be defined"
+  @ rc++
+endif
+
+if ( ! -f $ODB_LIBPATH/lib${dbname}.a ) then
+  echo "*** Error: No such library file '$ODB_LIBPATH/lib${dbname}.a'"
+  @ rc++
+endif
+
+if ( ! -f $ODB_SYSPATH/${dbname}.so ) then
+  echo "*** Error: No such shareable object '$ODB_SYSPATH/${dbname}.so'"
+  @ rc++
+endif
+
+if ( $rc > 0 ) exit $rc
+
+set this=`pwd`
+
+if ( $?SCRATCHDIR != 0 ) then
+  set tmpdir=$SCRATCHDIR
+else if ( $?SCRATCH != 0 ) then
+  set tmpdir=$SCRATCH
+else if ( $?TMPDIR != 0 ) then
+  set tmpdir=$TMPDIR
+else
+  set tmpdir=/tmp
+endif
+
+set tmpdir=$tmpdir/tmp.$$
+mkdir -p $tmpdir || exit 3
+cd $tmpdir
+
+echo Extracting VIEW-specific object files from \$ODB_LIBPATH/lib${dbname}.a ...
+ar  x $ODB_LIBPATH/lib${dbname}.a
+rm -f ${dbname}_T_*.o
+rm -f ${dbname}_Sstatic.o
+
+if ( "$views" == "" ) then
+  set scanviews=`ls ${dbname}_[a-z]*.o`
+else
+  cp $this/${dbname}_{$views}.o . || :
+  set scanviews=`ls ${dbname}_{$views}.o`
+endif
+
+set rctot=0
+set files=""
+
+foreach o ( $scanviews )
+  set obj=`basename $o .o`
+  set sofile=$this/${obj}.so
+  rm -f $sofile
+  set rc=0
+  echo ${ODB_LD} ${obj}.o \$ODB_SYSPATH/${dbname}.so -o $sofile
+       ${ODB_LD} ${obj}.o  $ODB_SYSPATH/${dbname}.so -o $sofile || set $rc=$status
+  if ( $rc != 0 ) then
+    echo "*** Error: Shareable object '$sofile' creation failed"
+    rm -f $sofile
+    @ rctot++
+  else
+    set name=`echo $obj | sed 's/^'$dbname'_//'`
+    if ( "$files" != "" ) then
+      set files="${files},$name"
+    else
+      set files="$name"
+    endif
+  endif
+end
+
+cd $this
+rm -rf $tmpdir
+
+if ( "$files" != "" ) then
+  ls -ltr ${dbname}_{$files}.so
+endif
+
+exit $rctot

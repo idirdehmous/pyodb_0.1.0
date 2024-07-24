@@ -1,0 +1,5 @@
+Observation day
+date@hdr
+0,-1 ! Automatic
+3,100,0 ! Method=3 --> mod(YYYYMMDD,100) + 0
+

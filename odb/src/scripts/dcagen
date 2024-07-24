@@ -1,0 +1,454 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..." >&2; wait; exit 1' 1 2 3 15
+
+set -eu
+#begin
+#=======================================================================
+#
+#     Script dcagen  
+#     -------------    
+#                         
+#     Purpose     : Creates Direct Column Access-files for given ODB
+#                   to improve post-processing & direct column access
+#                   from ODB tables
+#                               
+#     Usage       : dcagen [-l dbname] [-t table] [-f] [-d] [-n] [-u] [-i dbdir] [-v] [-N cpus]
+#                          [-F] [-b] [-B bufsiz] [-z] [-g] [-c colname@table] [-C colname@table]
+#                          [-x] [-Q] [-m] [-o output_file_prefix] [-D cache_disk] [-a] [-A] [-I] [-P]
+#                          [-e errlog] [-E errlog]
+#                                            
+#     Parameters  : -l dbname - database name (default: from *.dd file name)
+#     ----------    -t table  - table name (can be supplied multiple times)
+#                   -f        - force to continue despite fatal errors
+#                   -F        - force to create despite already exists
+#                   -d        - turn debugging on
+#                   -n        - do NOT update i.e. DO NOT use -u option for dcagen.x (the default)
+#                   -u        - use option -u for dcagen.x
+#                   -i dbdir  - Database directory (default: "." i.e. current dir)
+#                   -v        - Produce verbose output
+#                   -N        - How many CPUs to use to parallelize dcagen over multiple tables (default=3)
+#                   -b        - Create binary DCA-file instead of text
+#                   -B bufsiz - Override the ODB_CACHE_LIMIT used with -c/-C (in MBytes) (default=128)
+#                   -z        - Remove zero-length DCA-files (by default NOT removed)
+#                   -g        - DCA-files (binary or text) will be gzip'ped, if possible (by default: not)
+#                   -c c@t    - Create cache of column 'c@t' values to file cache/c@t.<#>
+#                   -C c@t    - Create unpacked cache of column 'c@t' values to file cache/c@t.<#>
+#                   -q        - Quiet option : Do not print dots (....) in show progress in non-verbose mode
+#                   -x        - Extract poolno,nrows,nmdis,cardinality,min,max of column(s) given by -c/-C
+#                   -m        - Same as -x, but prints only column name followed by aggregate min & max
+#                   -Q        - Quickmode: same as -x, but quits after the first input file has been processed
+#                   -o prefix - *ALL* cacheable files will be written to file(s) cache/prefix.cache.%d. Implies -N 1
+#                                If set to %s, then prefix will be based on prevailing tablename
+#                   -D cachedisk - root-path for cache-disk i.e. ODB_CACHE_DISK (default=cache)
+#                   -a        - cache all encountered columns. Do NOT unpack them (-C colname and -A override)
+#                   -A        - cache all encountered columns. Unpack them before caching
+#                   -I        - Do *NOT* (re-)create $dbname.IOASSIGN-file (even if it did not exist)
+#                   -P        - Prevent from running odbprune recursively (f.ex. when dcagen is called from odbprune)
+#                   -e errlog - Enforce stderr output to file errlog
+#                   -E errlog - Enforce stderr output to file errlog; as -e, but append to the existing errlog
+#
+#=======================================================================
+#end
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+thisdir=$(pwd)
+
+if [[ $# -gt 0 ]] ; then
+  ARGS="${cmd} $*"
+else
+  ARGS="${cmd}"
+fi
+
+USAGE="Usage: $0 [-l dbname] [-t table] [-f] [-F] [-d] [-u] [-n]"
+USAGE="$USAGE [-i dbdir] [-v] [-N cpus] [-b] [-B bufsiz] [-z] [-g]"
+USAGE="$USAGE [-c col@table] [-C col@table] [-q] [-x] [-m] [-Q] [-o output_file_prefix]"
+USAGE="$USAGE [-D cache_disk] [-a] [-A] [-I] [-P] [-e errlog] [-E errlog]"
+
+dbname=""
+tables=""
+force2continue=0
+force2create=0
+errflg=0
+debug=""
+update="-n" # -u (update) can be 100 times slower than if -n option was used ;-(
+dbdir=.
+verbose=0
+export ODB_PARAL=${ODB_PARAL:=4}
+paral=${ODB_PARAL}
+bufsiz=""
+binary=""
+bin=0
+rmzero=0
+dogzip=0
+cachec=""
+cacheC=""
+cacheit=0
+quiet=0
+extract=0
+extract_arg=""
+quick=0
+minmax=0
+oprefix=""
+oprefix_given=0
+export ODB_CACHE_DISK=${ODB_CACHE_DISK:="cache"} # could be f.ex. "/fast/disk"
+cachedisk=${ODB_CACHE_DISK}
+allcached=""
+ALLcached=""
+create_Ioassign=1 # ... but only when $dbname.IOASSIGN was not found
+prune=1
+errlog_given=0
+errlog="/dev/null"
+export OMP_NUM_THREADS=1
+
+while getopts aAbB:c:C:dD:e:E:fFgi:Il:mnN:o:PqQt:uvxz  option
+do
+  case $option in
+    a) allcached="-a"; cacheit=1;;
+    A) ALLcached="-A"; cacheit=1;;
+    b) binary="-b"; bin=1;;
+    B) bufsiz="-i $OPTARG";;
+    c) cachec="$cachec $OPTARG"; cacheit=1;;
+    C) cacheC="$cacheC $OPTARG"; cacheit=1;;
+    d) debug="-d";;
+    D) cachedisk="$OPTARG";;
+    e) errlog_given=1; errlog="$OPTARG";;
+    E) errlog_given=2; errlog="$OPTARG";;
+    f) force2continue=1;;
+    F) force2create=1;;
+    g) dogzip=1;;
+    i) dbdir=$OPTARG;;
+    I) create_Ioassign=0;;
+    l) dbname=$OPTARG;;
+    m) minmax=1; extract=1;;
+    n) update="-n";;
+    N) paral=$OPTARG;;
+    o) oprefix="-o $(basename $OPTARG)"; oprefix_given=1;;
+    P) prune=0;;
+    q) quiet=1;;
+    Q) extract=1; quick=1;;
+    t) tables="$tables$OPTARG ";;
+    u) update="-u";;
+    v) verbose=1;;
+    x) extract=1; quick=0;;
+    z) rmzero=1;;
+    *) errflg=1;;
+  esac
+done
+
+if [[ $extract -eq 1 ]] ; then
+  extract_arg="-x"
+  quiet=1
+  update="-n"
+  binary=""
+  bin=0
+  dogzip=0
+  paral=1
+  verbose=0
+  force2create=1
+  errlog_given=1; errlog="/dev/null"
+fi
+
+if [[ $errlog_given -ge 1 ]] ; then
+  if [[ $errlog_given -eq 1 ]] ; then # -e
+    exec 2>$errlog
+  else # -E
+    exec 2>>$errlog
+  fi
+fi
+
+if [[ $quiet -eq 0 ]] ; then
+  echo "$ARGS" >&2
+fi
+
+if [[ $cacheit -eq 1 && $oprefix_given -eq 1 ]] ; then
+  paral=1
+fi
+
+if [[ ! -d $dbdir ]] ; then
+  echo "***Error: Given database directory does not exist. Check your '-i dbdir'" >&2
+  errflg=2
+else
+  dbdir=$(\cd $dbdir>/dev/null 2>&1; pwd)
+  if [[ "$dbname" = "" ]] ; then
+    dbname=$(\cd $dbdir>/dev/null 2>&1; \ls -C1 *.dd 2>/dev/null | head -1)
+    dbname=$(basename $dbname .dd)
+  fi
+fi
+
+if [[ "$dbname" = "" ]] ; then
+  echo "***Error: Unable to determine the database name. Check your '-l dbname'" >&2
+  errflg=3
+fi
+
+dbname=$(echo "$dbname" | perl -pe 's/\..*//')
+ddfile=$dbdir/$dbname.dd
+npools=0
+if [[ ! -f $ddfile ]] ; then
+  echo "***Error: Unable to locate the main metadata file (ddfile '$ddfile')" >&2
+  errflg=4
+else
+  npools=$(head -5 $ddfile | tail -1)
+fi
+
+#=======================================================================
+#   Report errors and exit
+#=======================================================================
+
+if [[ $errflg -ne 0 ]] ; then
+  echo "***Error(s) were detected" >&2
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//' >&2
+  exit 1
+fi
+
+#=======================================================================
+# Begin processing ...
+#=======================================================================
+
+if [[ $prune -eq 1 ]] ; then
+  prunecmd="odbprune -i $dbdir"
+  if [[ $quiet -eq 1 ]] ; then
+    prunecmd="$prunecmd -q"
+  fi
+  $prunecmd || {
+    rc=$?
+    echo "***Error in $0: '$prunecmd' has failed" >&2
+    exit $rc
+  }
+fi
+
+dcadir_in=$dbdir/dca
+dcadir_out=$dbdir/dca
+
+if [[ $create_Ioassign -eq 1 && ! -f $dbdir/$dbname.IOASSIGN ]] ; then
+  #-- Make sure $dbdir/$dbname.IOASSIGN exists
+  \cd $dbdir
+  if [[ $quiet -eq 1 ]] ; then
+    create_ioassign -l $dbname -q >&2
+  else
+    create_ioassign -l $dbname >&2
+  fi
+  \cd $thisdir
+fi
+
+if [[ "$(echo "$cachedisk" | cut -c1)" != "/" ]] ; then
+  cachedisk=./$cachedisk
+fi
+export ODB_CACHE_DISK="$cachedisk"
+
+cacheall=""
+cachearg=""
+if [[ $cacheit -eq 1 ]] ; then
+  if [[ $extract -eq 0 ]] ; then
+    [[ -d $cachedisk ]] || mkdir -p $cachedisk
+  fi
+  if [[ "$cachec" != "" ]] ; then
+    cacheallc=$(echo "$cachec" | perl -pe 's/,/ /g; s/\s+/ /g;')
+    cachec=$(echo "$cachec" | perl -pe 's/,/ /g; s/\s+/ /g; s/(\S+)/-c $1/g')
+  else
+    cacheallc=""
+  fi
+  if [[ "$cacheC" != "" ]] ; then
+    cacheallC=$(echo "$cacheC" | perl -pe 's/,/ /g; s/\s+/ /g;')
+    cacheC=$(echo "$cacheC" | perl -pe 's/,/ /g; s/\s+/ /g; s/(\S+)/-C $1/g')
+  else
+    cacheallC=""
+  fi
+  cacheall="$cacheallc $cacheallC"
+  cachearg="$oprefix $ALLcached $allcached $cachec $cacheC" # Note: oprefix (-o flag) MUST BE prior to -c/-C flags
+fi
+
+if [[ "$tables" = "" ]] ; then
+  tables=$(egrep ^@ $ddfile | perl -ne 'print "$1\n" if (m/^\@(\S+)\s+\d+/)' | perl -pe 's/\n/ /g;')
+
+# reorder tables for optimal parallel dcagen: largest tables first
+# for this we need the actual cumulative filesizes for each table
+
+  TMPDIR=${TMPDIR:=/tmp}
+  sizes=$TMPDIR/sizes.pl.$$
+  cat > $sizes <<'EOF'
+use strict; my %cnt = (); my $size; my $key;
+for (<>) { next if (m/^\s*$/); s/^\s+//; s|\s+\d+/| |; ($size,$key) = split/\s+/; $cnt{$key} += $size; }
+foreach $key (keys(%cnt)) { $size = $cnt{$key}; print "$size $key\n"; }
+EOF
+
+  #-- AIX doesn't seem to support 'xargs -r', but its 'xargs' by default implies -r ...
+  xargs_r=$(echo "" | xargs -r 2>/dev/null && echo "xargs -r" || echo "xargs")
+
+  tables=$(\cd $dbdir >/dev/null 2>&1; \
+          (echo "$tables" | perl -pe 's/\s*(\w+)/0 $1\n/g;' ; \
+           find [0-9]* -type f -follow 2>/dev/null | $xargs_r ls -C1s) | \
+           perl -w $sizes | sort -nr -k1,1 | awk '{print $NF}' | perl -pe 's/\n/ /g;')
+
+  rm -f $sizes
+else
+  tables=$(echo "$tables" | perl -pe 's/,/ /g; s/\s+/ /g;')
+fi
+
+[[ $verbose -eq 0 ]] || set +xv
+
+[[ $verbose -eq 0 ]] || echo "dcagen: $(pwd) ..."
+[[ -d $dcadir_out ]] || mkdir $dcadir_out
+
+in_error=$thisdir/in_error
+rm -f $in_error
+
+function dcagen_parallel {
+  set -eu
+  typeset t=$1
+  if [[ $cacheit -eq 1 ]] ; then
+    typeset ca
+    for ca in $cacheall
+    do
+      typeset col=$(echo "$ca" | perl -pe 's/\@.*//')
+      if [[ $extract -eq 0 ]] ; then
+        rm -f $cachedisk/${col}@$t.cache.*
+      fi
+    done
+  fi
+  typeset cnt=0
+  typeset dcafile_out
+  if [[ $extract -eq 0 ]] ; then
+    dcafile_out=$dcadir_out/$t.dca
+  else
+    dcafile_out=$dcadir_out/$t.extract
+  fi
+  typeset rc=0
+  typeset nohdr=""
+  typeset gzip=""
+  [[ $dogzip -eq 0 ]] || gzip=$(whence gzip 2>/dev/null || echo "")
+  typeset v=""
+  [[ $verbose -eq 0 ]] || v="v"
+  if [[ $bin -eq 0 ]] ; then
+    typeset dcafile_in=$dcadir_in/$t.dca
+    egrep '^#DCA' $dcafile_in 2>/dev/null | egrep 'is_little$' >/dev/null 2>&1 || rc=$?
+  fi
+  if [[ $rc -ne 0 ]] || [[ $force2create -eq 1 ]] ; then
+    [[ $verbose -eq 0 ]] || echo "Creating DCA-information for table $t ..."
+    cat /dev/null > $dcafile_out
+#    for f in $(\cd $dbdir >/dev/null 2>&1; \
+#               find [0-9]* -type f -follow -name $t -print 2>/dev/null | sort -n)
+    typeset f
+    typeset poolno=0
+    while [[ $poolno -lt $npools ]]
+    do
+     ((poolno += 1))
+     f=$poolno/$t
+     if [[ -r $dbdir/$f ]] ; then
+      typeset cmd
+      cmd=$(echo "$ODB_FEBINPATH/dcagen.x $debug $update -f $ddfile -l $dbname \
+            -t $t $cachearg -p $poolno $binary $bufsiz $nohdr $extract_arg $f")
+      cmd=$(echo "$cmd" | perl -pe 's/\s+/ /g')
+
+      [[ $verbose -eq 0 ]] || echo "cd $dbdir; $cmd"
+      (\cd $dbdir >/dev/null 2>&1; $cmd) >> $dcafile_out || {
+        echo "***Error in '$cmd'" >&2
+        [[ $force2continue -eq 1 ]] || {
+           echo "***Error in '$cmd'" >> $in_error
+           exit 1
+        }
+      }
+      if [[ $extract -eq 0 && $verbose -eq 0 && $quiet -eq 0 ]] ; then # ...... printout (per every 10th)
+        ((cnt += 1))
+        typeset tst=$((cnt%10))
+        if [[ $tst -eq 1 ]] ; then
+          (echo "." | perl -pe 's/\n//' >&2)  # echo -n not available on all Junikses
+        fi
+      fi
+      nohdr="-h"
+      if [[ $quick -eq 1 ]] ; then # get out now
+        poolno=$npools
+      fi
+     fi # if [[ -r $f ]] ; then ...
+    done
+
+    if [[ $extract -eq 0 && $verbose -eq 0 && $quiet -eq 0 ]] ; then # last ..... printout
+      (echo "." | perl -pe 's/\n//' >&2)  # echo -n not available on all Junikses
+    fi
+
+    if [[ $extract -eq 1 ]] ; then
+      if [[ $minmax -eq 1 ]] ; then 
+        typeset cols=$(awk '{print $1}' < $dcafile_out | sort -u)
+        typeset ca
+        for ca in $cols
+        do
+          egrep "^$ca " $dcafile_out |\
+            awk 'BEGIN { name=""; min=1e+100; max=-1e+100;}  { \
+                 name=$1; \
+                 if ($NF > max) { max=$NF; } \
+                 if ($(NF-1) < min) { min=$(NF-1);}          } \
+                 END {print name,min,max;}'
+        done
+      else
+        cat $dcafile_out
+      fi
+      rm -f $dcafile_out
+    else
+      if [[ $bin -eq 0 ]] ; then  
+        egrep '^#DCA' $dcafile_out | head -1 > $dcafile_out.$$
+        egrep -v '^#' $dcafile_out | sort -n -k1,1 -k6,6 >> $dcafile_out.$$
+        mv $dcafile_out.$$ $dcafile_out
+      fi
+
+      if [[ -s $dcafile_out ]] ; then
+        if [[ "$gzip" != "" && -x "$gzip" ]] ; then
+          rm -f $dcafile_out.gz
+          $gzip -1$v $dcafile_out
+          if [[ -f $dcafile_out.gz ]] ; then
+            mv $dcafile_out.gz $dcafile_out
+          fi
+        fi
+      elif [[ $rmzero -eq 1 ]] ; then
+        rm -f $dcafile_out
+      fi
+    fi # if [[ $extract -eq 1 ]] ; then ... else ...
+  fi
+}
+
+subproc="&"
+if [[ $paral -le 1 ]] ; then
+  subproc=""
+  paral=1
+fi
+
+setx="";
+[[ $verbose -eq 0 ]] || setx="set -x;"
+
+[[ $verbose -eq 0 ]] || date
+n=0
+for t in $tables
+do
+  eval "($setx dcagen_parallel $t) $subproc"
+  ((n+=1))
+  if [[ -f $in_error && $force2continue -eq 0 ]] ; then
+    break
+  fi
+  [[ $((n%$paral)) -eq 0 ]] && wait
+  if [[ -f $in_error && $force2continue -eq 0 ]] ; then
+    break
+  fi
+done
+wait
+
+if [[ $extract -eq 0 ]] ; then
+  if [[ $quiet -eq 0 ]] ; then
+    [[ $verbose -eq 1 ]] || echo " "
+    [[ $verbose -eq 0 ]] || date
+  fi
+fi
+
+if [[ -f $in_error ]] ; then
+  echo "***Error: There were error(s) encountered during dcagen run(s)" >&2
+  cat $in_error >&2
+  rm -f $in_error
+  exit 1
+elif [[ $verbose -eq 1 ]] ; then
+  pwd
+  ls -Lltr $dcadir_out/*.dca 2>/dev/null || :
+  if [[ $cacheit -eq 1 && $extract -eq 0 ]] ; then
+    ls -Lltr $cachedisk 2>/dev/null || :
+  fi
+fi
+
+exit 0
+
+

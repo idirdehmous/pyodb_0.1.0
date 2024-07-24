@@ -1,0 +1,321 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15 
+#begin
+#
+#   Usage: odbless -l dbname                        : by default automatically detected
+#                  -v viewname_or_sqlfile           : default=myview ; could be a table name, say: @hdr
+#                  -q 'select statement'            : supply ODB/SQL query directly (by default implies -v myview)
+#                  -s starting_row                  : default=1 (counting starts from the first active pool)
+#                  -n max_number_of_rows_to_display : default=100 ; if -1 --> unlimited)
+#                  -a                               : display all rows (same as -n -1)
+#                  -b row_buffer_size               : default=1000 ; if -1 --> no. of rows in each pool)
+#                  -E                               : Use the same -s & -n & -b option for Every pool separately
+#                  -x your_less_command             : default="less -nISX"
+#                  -p poolmask(s)                   : default=-1 i.e. all pools included; f.ex.: -p 1 -p1-4 -p1,3,6
+#                  -k                               : konvert (lat,lon) to degrees
+#                  -c                               : force re-creation of lib<dbname>.a
+#                  -d "options"                     : run also dcagen with these options
+#                  -5                               : do NOT use fast I/O-method=5, even if desirable
+#                  -S                               : display ONLY summary data
+#                  -I                               : Ignore summary data
+#                  -f output_file                   : Save displayed data on file output_file, too
+#                  -X                               : View output also by opening an X-window
+#                  -T                               : set ODB tracing on
+#                  -g                               : Enable debugging output go to stderr.out
+#                  -D debugger                      : Run tool under debugger (default=none)
+#                  -0                               : (zero) ignore stderr (by default written to stderr.out)
+#                  -i                               : Show also database index (as a last column) i.e. export ODB_SHOWDBIDX=1
+#                  -e                               : Show output in editable file (implies -X) [odbedit not implemented yet]
+#                  -H dr_hook_opt                   : Enable Dr.Hook profiler and export DR_HOOK_OPT with dr_hook_opt
+#                  -h                               : Print help/usage and abort
+#
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 26-Jan-2006 .. 03-Feb-2006
+#
+
+set -eu
+
+export SHELL=/bin/ksh
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+basecmd=$(basename $cmd)
+baseless=$(echo "$basecmd" | perl -pe 's/odb[_]?//')
+
+thisdir=$(pwd)
+cd $thisdir
+
+dbname=""
+dbdir=$thisdir
+viewname=myview
+start=1
+limit=100
+rowbuf=1000
+if [[ "$baseless" = "less" ]] ; then
+  less="less -nISX"
+elif [[ "$baseless" = "more" ]] ; then
+  less=more
+elif [[ "$baseless" = "cat" ]] ; then
+  less=cat
+else
+  less=cat
+fi
+poolmask=""
+stderr=stderr.out
+query=""
+query_given=0
+dcagen_opt=""
+io_method=5
+recompile=0
+konvert=0
+summary=1
+output=/dev/null
+trace=0
+xwin=0
+debug=0
+debugger=""
+export ODB_SHOWDBIDX=${ODB_SHOWDBIDX:=0}
+odbedit=0 # not implemented yet
+drhookopt=""
+every=0
+
+FLAGS=ab:cd:eED:f:ghH:iIkl:n:p:q:s:STv:x:X05
+
+abort=no
+while getopts ${FLAGS} i
+do
+  case $i in
+  a) limit="-1";;
+  b) rowbuf="$OPTARG";;
+  c) recompile=1;;
+  d) dcagen_opt="$OPTARG";;
+  D) debugger="$OPTARG";;
+  e) odbedit=1; xwin=1;;
+  E) every=1;;
+  f) output="$OPTARG";;
+  g) debug=1;;
+  h) abort=yes; break;;
+  H) drhookopt="$OPTARG";;
+  i) ODB_SHOWDBIDX=1;;
+  I) summary=0;;
+  k) konvert=1;;
+  l) dbname="$OPTARG";;
+  n) limit="$OPTARG";; 
+  p) poolmask="$poolmask $OPTARG";;
+  q) query_given=1; query="$OPTARG";;
+  s) start="$OPTARG";;
+  S) summary=2;;
+  T) trace=1;;
+  v) viewname="$OPTARG";;
+  x) less="$OPTARG";;
+  X) xwin=1;;
+  0) stderr="/dev/null";;
+  5) io_method=-1;; # Setting this to a <=0 value will ensure I/O-method 5 will NOT be used
+                    # If > 0, there is an automatic test for READ/ONLY databases, whether ./dca
+                    # directory exists. But keeping I/O-method <= 0 bypasses this testing
+  *) abort=yes; break;;
+  esac
+done
+
+export ODB_READONLY=${ODB_READONLY:=1}
+
+if [[ "$abort" = "no" && "$dbname" = "" ]] ; then
+  dbname=$(basename $(\ls -C1 *.dd 2>/dev/null | head -1) .dd || echo "")
+  if [[ "$dbname" = ".dd" ]] ; then
+    dbname=""
+    abort=yes
+  fi
+fi
+
+if [[ "$abort" = "no" && "$debugger" != "" ]] ; then
+  typeset test=$(whence "$debugger" 2>/dev/null || echo "")
+  if [[ "$test" = "" ]] ; then
+    echo "***Error: Unable to locate debugger '$debugger'"
+    abort=yes
+  else
+    debugger=$test
+  fi
+fi
+
+if [[ "$abort" = "yes" ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//' | sed "s/odbless /$basecmd /"
+  exit 1
+fi
+
+if [[ -d "$dbname" ]] ; then
+  dbdir=$(\cd $dbname 2>/dev/null ; pwd)
+  dbname=$(basename "$dbname" | perl -pe 's/\..*//; tr/a-z/A-Z/')
+fi
+
+is_table=$(echo "$viewname" | perl -ne 'if (m/^\@/) {print 1;} else {print 0;}')
+so=$(basename "$viewname" | perl -pe 's/^.*\.so$/so/')
+
+if [[ "$so" = so ]] ; then
+  is_so=1
+else
+  is_so=0
+fi
+
+if [[ $is_table -eq 1 ]] ; then
+  sqlfile=/dev/null
+else
+  if [[ $is_so -eq 1 ]] ; then
+    viewname=$(basename "$viewname" .so)
+    sqlfile=$viewname.sql
+  elif [[ -f $viewname ]] ; then
+    sqlfile=$viewname
+  else
+    sqlfile=$viewname.sql
+  fi
+fi
+
+cd $dbdir
+
+if [[ $is_table -eq 0 && $query_given -eq 1 ]] ; then
+  echo "$query" > $sqlfile
+fi
+
+if [[ ! -f lib$dbname.a ]] || \
+   [[ ! -f $dbname.ddl_ ]] || \
+   [[ ! -f ${dbname}.h  ]] || \
+   [[ $ODB_FEBINPATH/odb98.x -nt $dbname.ddl_ ]] || \
+   [[ $dbname.ddl -nt $dbname.ddl_ ]] ; then
+  recompile=1
+fi
+
+if [[ $recompile -eq 1 ]] ; then
+  odbcomp $dbname.sch
+fi
+
+if [[ "$dcagen_opt" != "" ]] ; then
+  dcagen -F $dcagen_opt
+fi
+
+if [[  $is_table -eq 0 && $is_so -eq 0 && \
+       "$sqlfile" != "/dev/null" && -f $sqlfile ]] ; then
+  odbcomp -l$dbname -w $sqlfile
+fi
+
+if [[ $is_table -eq 1 ]] ; then
+  export ODB_CONSIDER_TABLES=$(echo $viewname | perl -pe 's#\@(\w+)#/\L$1/#')
+elif [[ -f ${dbname}_$viewname.c ]] ; then
+  # the following hassle defines you the ODB_CONSIDER_TABLES
+  eval `fgrep '#define ODB_CONSIDER_TABLES' ${dbname}_$viewname.c | awk '{print "export",$2"="$3}'`
+else
+  export ODB_CONSIDER_TABLES='*'
+fi
+ODB_CONSIDER_TABLES=$(echo "$ODB_CONSIDER_TABLES" | perl -pe 'tr/A-Z/a-z/')
+echo "==> ODB_CONSIDER_TABLES=$ODB_CONSIDER_TABLES"
+
+if [[ "$poolmask" != "" ]] ; then
+  poolmask=$(echo $poolmask | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g')
+  export ODB_PERMANENT_POOLMASK="$poolmask"
+  echo "==> ODB_PERMANENT_POOLMASK=$ODB_PERMANENT_POOLMASK"
+fi
+
+exe=./odbless.x
+if [[ $recompile -eq 1 ]] || \
+   [[ $is_so -eq 0 ]] || \
+   [[ ! -f $exe ]] || \
+   [[ lib$dbname.a -nt $exe ]] || \
+   [[ $ODB_LIBPATH/libodbmain.a -nt $exe ]] ; then
+  obj=$($ODB_AR t $ODB_LIBPATH/libodbmain.a | grep Odbless)
+  $ODB_AR x $ODB_LIBPATH/libodbmain.a $obj
+  odbf90 $obj -l$dbname -o $exe
+  rm -f $obj
+fi
+
+export ODB_LAT=${ODB_LAT:="lat@hdr"}
+export ODB_LON=${ODB_LON:="lon@hdr"}
+export ODB_LATLON_RAD=$($ODB_FEBINPATH/latlon_rad 2>/dev/null || echo "-1")
+
+#-- I/O-method
+ddfile=$dbdir/$dbname.dd
+if [[ -s $ddfile ]] ; then
+  iom=$(head -1 $ddfile | awk 'BEGIN {n=1;} {if (NF >= 3) n=$3;} END {print n;}')
+else
+  iom=1
+fi
+
+#-- remove possible file (not dir) $dbdir/dca, and if not successful then possible *empty* $dbdir/dca dir
+\rm $dbdir/dca 2>/dev/null || rmdir $dbdir/dca 2>/dev/null || :
+
+export ODB_IO_METHOD=${ODB_IO_METHOD:=$io_method}
+if [[ $io_method -eq 5 && ! -d $dbdir/dca ]] ; then
+#  ODB_IO_METHOD=$iom
+  ODB_IO_METHOD=0 # for now
+fi
+
+export ODB_REPORTER=stdout
+if [[ $summary -ge 1 ]] ; then
+  export DR_HOOK=true
+  export DR_HOOK_IGNORE_SIGNALS=8 # Can't afford SIGFPE's caused by the summary print-out
+fi
+
+if [[ "$debugger" = "" ]] ; then
+  cmd="$exe $dbname $viewname $start $limit $rowbuf $konvert $summary $debug $every 2>$stderr"
+  cmd="$cmd | awk '{ if (NR <= 3 || NR > 6) print; }'"
+
+  if [[ $summary -eq 2 ]] ; then
+    cmd="$cmd | awk '/^:/' | uniq"
+  fi
+
+  export DISPLAY=${DISPLAY:-no}
+  if [[ "$DISPLAY" = no ]] ; then
+    xwin=0 # X-windows output turned off, since DISPLAY was not set
+  fi
+
+  if [[ $xwin -eq 1 && "$output" = "/dev/null" ]] ; then
+    output="$viewname.rpt"
+  fi
+
+  if [[ $summary -eq 2 && "$output" = "/dev/null" ]] ; then
+    output="$viewname.rpt"
+  fi
+
+  if [[ "$output" != "/dev/null" ]] ; then
+    cmd="$cmd | tee $output"
+    rm -f $output
+  fi
+
+  if [[ "$(basename $less)" != less ]] ; then
+    eval `resize`
+    cmd="$cmd | cut -c1-$COLUMNS"  # Note: Only this many columns will be output; file (if any) contains all
+  fi
+
+  cmd="$cmd | $less"
+
+  if [[ $trace -eq 1 ]] ; then # turn ODB-tracing on
+    export ODB_TRACE_PROC=-1
+    export ODB_TRACE_FILE=trace.%d
+    export ODB_TRACE_FLUSH_FREQ=1
+  fi
+
+  if [[ "$drhookopt" != "" ]] ; then
+    export DR_HOOK=true
+    export DR_HOOK_OPT="$drhookopt"
+  fi
+
+  eval $cmd
+
+  if [[ $xwin -eq 1 && -s "$output" ]] ; then
+    $ODB_REPORTER $output &
+  fi
+
+else # Run under $debugger
+
+  cmdargs="$dbname $viewname $start $limit $rowbuf $konvert $summary $debug"
+
+  echo "Using debugger '$debugger'"
+  echo "Use the following arguments: $cmdargs"
+  
+  $debugger $exe
+
+fi
+
+exit 0
+
+
+
+

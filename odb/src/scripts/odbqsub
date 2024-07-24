@@ -1,0 +1,142 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15
+#begin
+#
+# echo "command(s)-to-be-executed" | odbqsub [qsub-options]
+#  or
+# cat file | odbqsub [qsub-options]
+#
+# Please note that commands to be executed are always read from stdin i.e. also
+# a multiline here-document would be acceptable.
+#
+# NOTE: This utility is for ODB_ARCH=nectx only in order to submit jobs in batch queue for NEC SX (ODB_ARCH=necsx)
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 12-Feb-2007
+#
+#
+
+set -eu
+
+thisdir=$(pwd)
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+test_arch=$(test_arch 2>/dev/null || echo "unknown")
+
+if [[ "$test_arch" != "nectx" ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//' >&2
+  exit 1
+fi
+
+qsub_opts=${*:-}
+
+jobname=odb
+queue=vector
+
+FLAGS=N:q:
+while getopts ${FLAGS} i
+do
+  case $i in
+  N) jobname=$(echo "$OPTARG" | cut -c1-15);;
+  q) queue="$OPTARG";;
+  esac
+done
+
+successful_completion="Successful completion"
+
+jobfile=$jobname.job
+
+necsx_arch=$(echo "$ARCH" | sed 's/nectx/necsx/')
+necsx_odb_dir=$(echo "$ODB_ROOT" | perl -pe 's|(^.*ODBDIR)/.*|$1|')
+necsx_odb_version=$(odbversion)
+necsx_odb_root=$(echo "$ODB_ROOT" | sed 's/nectx/necsx/')
+
+cat > $jobfile <<EOF
+#PBS -N $jobname
+#PBS -q $queue
+#PBS -S /bin/ksh
+#PBS -l elapstim_req=00:10:00
+#PBS -l cpunum_job=1
+#PBS -l memsz_job=2gb
+#PBS -b 1
+#PBS -j o
+set -eu
+rc=0
+ulimit -c 0 2>/dev/null || :
+set -a
+ARCH=$necsx_arch
+ODB_DIR=$necsx_odb_dir
+ODB_VERSION=$necsx_odb_version
+ODB_ROOT=$necsx_odb_root
+set +a
+use_odb=\$ODB_ROOT/bin/use_odb.sh
+[[ -r \$use_odb ]] || {
+  echo "***Error: Unable to locate the ODB initialization file \$use_odb"    >&2
+  echo "          Check also the existence of ODB_ROOT directory \$ODB_ROOT" >&2
+  exit 1
+}
+. \$use_odb
+set -a
+$(printenv | egrep "^ODB_(READONLY|IO_METHOD|SRCPATH|DATAPATH|PERMANENT|LATLON|TRACE|PRINT|)" || :)
+$(printenv | egrep "^ODB_(VIEWER|EDITOR|PACKING|PLOTTER|REPORTER)" || :)
+$(printenv | egrep "^(IOASSIGN|EC_|DR_HOOK|RUN_FE|F_|C_)" || :)
+$(printenv | egrep "^(GDB|DBX)DEBUGGER" || :)
+set +a
+cd $thisdir
+$(cat)
+set +xv
+[[ \$rc -eq 0 ]] || exit \$rc
+wait
+echo "$successful_completion"
+EOF
+
+#-- Submit & monitor the job
+
+submit=$(qsub $qsub_opts $jobfile)
+echo "$submit" >&2
+date >&2
+
+reqid=$(echo "$submit" | awk '{print $2}' | perl -pe 's/^(\d+).*/$1/')
+qstat -r $reqid | head -2 >&2
+
+tty=$(tty -s 2>/dev/null && echo "0" || echo "$?")
+
+count=0
+rc=$reqid
+qstat=""
+last=""
+while [[ "$rc" = "$reqid" ]]
+do
+  ((count+=1))
+  [[ $count -eq 1 ]] || sleep 1
+  qstat=$(qstat -r $reqid | awk '{if (NR > 2) print;}')
+  if [[ "$last" != "$qstat" ]] || [[ $((count%10)) -eq 0 ]] ; then
+    if [[ $tty -eq 0 ]] ; then
+      echo "$qstat" | perl -pe 's/\n/\r/' >/dev/tty
+    else
+      echo "$qstat" >&2
+    fi
+    last="$qstat"
+  fi
+  rc=$(echo "$qstat" | perl -pe 's/^(\d+).*/$1/')
+done
+
+echo "$qstat" >&2
+date >&2
+
+joboutput=$jobname.o$reqid
+
+if [[ -f $joboutput ]] ; then
+  cat $joboutput
+  last_line=$(tail -1 $joboutput)
+  [[ "$last_line" = "$successful_completion" ]] || {
+    echo "***Error: The batch job ($reqid) did not complete successfully"
+    exit 2
+  }
+else
+  echo "***Error: Unable to find the output-file '$joboutput'"
+  echo "          Please check you jobfile '$jobname.job'"
+  exit 1
+fi
+
+exit 0

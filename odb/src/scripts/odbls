@@ -1,0 +1,322 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15
+#begin
+#
+#   odbls [other_options] [-l] database_directory
+#
+#      If -l is included, then a wide listing will be produced
+#      If -l is omitted, then just the list of ODB-tables will be output
+#
+#   In the alternative form the -l *must* be given and be followed by the database directory
+#
+#   odbls [other_options] -l database_directory other_options
+#
+# other_options:
+#   -a            : Print a complete summary listing
+#   -p poolnos    : default=-1 i.e. all pools included; f.ex.: -p 1 -p1-4 -p1,3,6
+#   -s            : Sort w.r.t. number of rows, smallest first
+#   -r            : Sort w.r.t. number of rows, biggest first
+#   -T            : Do *not* display the title columns
+#   -w where_cond : Supply a simple, table specific WHERE-condition for filtering
+#   -z            : Do *not* show zero length tables (tables w/o any rows)
+#   -t            : Do *not* print the total size information at the end. Also,
+#                   omit the "Total <count>"-record, when -l has *not* been used
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 01-Jun-2007
+#
+
+set -eu
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+abort=no
+
+function do_abort {
+  typeset kmd=$1
+  typeset rest=$2
+  awk '/#begin/,/#end/' $kmd | egrep -v '#(begin|end)' | sed 's/^#//' >&2
+  echo "*** Error in command : $(basename $kmd) $rest" >&2
+  exit 1
+}
+
+nargs=$#
+args=${*:-}
+
+mysort=$ODB_FEBINPATH/mysort
+
+all=0
+poolmask=""
+sort=0
+title=1
+where="1"
+widelst=0
+dbdir="."
+zero=1
+total=1
+
+if [[ $nargs -gt 0 ]] ; then
+  last=""
+  for a in $args
+  do
+    last=$a
+  done
+  if [[ "$last" != "" ]] ; then
+    first=$(echo "X$last" | cut -c2-2)
+    if [[ "$first" = "-" ]] ; then
+      has_el=$(echo "X$last" | egrep 'l$' >/dev/null 2>&1 && echo "1" || echo "0")
+      if [[ $has_el -eq 1 ]] ; then
+        exec $0 $args .
+        exit 1
+      fi
+    fi
+  fi
+fi
+
+if [[ $nargs -eq 0 ]] ; then
+  title=0
+elif [[ $nargs -eq 1 && "$args" = "-l" ]] ; then
+  widelst=1
+else
+  FLAGS=ap:srTw:l:zt
+  while getopts $FLAGS option
+  do
+    case $option in
+    a) all=1;;
+    p) poolmask="$poolmask $OPTARG";;
+    s) sort=1;;
+    r) sort=-1;;
+    T) title=0;;
+    w) where="$OPTARG";;
+    l) widelst=1; dbdir="$OPTARG";;
+    z) zero=0;;
+    t) total=0;;
+    *) echo "***Error: Unrecognized option : $option" >&2; abort=yes; break;;
+    esac
+  done
+  shift $(expr $OPTIND - 1) || :
+  if [[ $# -eq 0 ]] ; then
+    :
+  elif [[ $# -eq 1 && $widelst -eq 0 ]] ; then
+    dbdir=$1
+    title=0
+  else
+    echo "***Error: Unrecognized arguments : $*" >&2
+    abort=yes
+  fi
+fi
+
+#-- Some sanity checks ...
+
+if [[ $abort = no ]] ; then
+  if [[ ! -d "$dbdir" ]] ; then
+    echo "***Error: Database directory '$dbdir' not found" >&2
+    abort=yes
+  else
+    dbdir=$(\cd $dbdir>/dev/null 2>&1; pwd)
+  fi
+
+  dbname=$(\cd $dbdir>/dev/null 2>&1; \ls -C1 *.dd 2>/dev/null | head -1)
+  dbname=$(basename "$dbname" .dd)
+
+  if [[ "$dbname" = "" ]] ; then
+    echo "***Error: Database name could not be determined. No .dd-file under $dbdir ?" >&2
+    abort=yes
+  fi
+fi
+
+if [[ $abort = no ]] ; then
+  ddfile=$dbdir/$dbname.dd
+  if [[ ! -f "$ddfile" ]] ; then
+    echo "***Error: Database main metadata-file '$ddfile' not found" >&2
+    abort=yes
+  fi
+fi
+
+#-- Abort ?
+
+if [[ $abort = yes ]] ; then
+  do_abort $cmd "$args"
+fi
+
+#-- Get going ...
+
+tty=$(tty -s 2>/dev/null && echo "0" || echo "$?")
+
+if [[ "$poolmask" != "" ]] ; then
+  poolmask=$(echo $poolmask | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g')
+else
+  poolmask="-1"
+fi
+
+#-- AIX doesn't seem to support 'xargs -r', but its 'xargs' by default implies -r ...
+xargs_r=$(echo "" | xargs 2>/dev/null && echo "xargs -r" || echo "xargs")
+
+tables=$(egrep ^@ $ddfile | perl -ne 'print "$1\n" if (m/^\@(\S+)\s+\d+/)' | perl -pe 's/\n/ /g;')
+npools=$(head -5 $ddfile| tail -1)
+ntables=$(head -6 $ddfile| tail -1)
+
+#--- Output ---
+
+if [[ $all -eq 1 ]] ; then
+  iom=$(head -1 $ddfile | awk 'BEGIN {n=1;} {if (NF >= 3) n=$3;} END {print n;}')
+  cycle=$(head -1 $ddfile | awk '{printf("%s",$1);}')
+  release=$(head -1 $ddfile | awk '{printf("%s",$2);}')
+  creation_tstamp=$(head -2 $ddfile | tail -1)
+  last_updated_tstamp=$(head -3 $ddfile | tail -1)
+  analysis_tstamp=$(head -4 $ddfile | tail -1)
+  echo "ODB database           = $dbname"
+  host=$(hostname)
+  echo "Datatase host          = $host"
+  echo "Database directory     = $dbdir"
+  echo "Number of tables       = $ntables"
+  echo "Number of data pools   = $npools"
+  echo "Data pools used        = $poolmask"
+  ntsl=0
+  for t in $tables
+  do
+    if [[ $t = "timeslot_index" ]] || [[ $t = "index" ]] ; then
+      poolno=$(\ls -C1 [0-9]*/$t 2>/dev/null | awk -F/ '{print $(NF-1)}' | sort -n | head -1)
+      if [[ "$poolno" != "" ]] ; then
+        if [[ $t = "timeslot_index" ]] ; then
+          entry="timeslot"
+        else
+          entry="tslot"
+        fi
+        ntsl=$(odbsql -BT -i $dbdir -q "select count(distinct $entry) from $t" -p$poolno 2>/dev/null || echo "-1")
+        break
+      fi
+    fi
+  done
+  echo "Number of time-slots   = $ntsl"
+  echo "Database I/O-method    = $iom"
+  echo "Created with revision  = CY${cycle}R${release}"
+  echo "Creation timestamp     = $creation_tstamp"
+  echo "Last updated timestamp = $last_updated_tstamp"
+  echo "Analysis timestamp     = $analysis_tstamp"
+  echo "Current timestamp      = $(date '+%Y%m%d %H%M%S')"
+  if [[ "$where" != "1" ]] ; then
+    echo "WHERE-statement = $where"
+  fi
+fi
+
+if [[ "X$poolmask" = "X-1" && "X$where" = "X1" ]] ; then
+  simple=2
+  reftbl=""
+elif [[ "X$poolmask" != "X-1"  && "X$where" = "X1" ]] ; then
+  simple=1
+  reftbl=""
+else
+  simple=0
+  reftbl=$(echo "$where" | perl -pe 's/^.*?[@#](\w+)\b.*/$1/')
+  tables="$reftbl"
+  sort=0
+  ntables=1
+  total=0
+fi
+
+if [[ $title -eq 1 && $widelst -eq 1 ]] ; then
+  if [[ "$where" = "1" ]] ; then
+    echo "Id# Table_Name Data_Size(Bytes) #_of_Cols #_of_Rows" |\
+      awk '{printf("%3s %20s %20s %12s  %s\n",$1,$2,$3,$4,$5);}'
+    echo "--- ---------- ---------------- --------- ---------" |\
+      awk '{printf("%3s %20s %20s %12s  %s\n",$1,$2,$3,$4,$5);}'
+  else
+    echo "Id# Table_Name Data_Size(Bytes) #_of_Cols #_of_Rows ,WHERE" |\
+      awk '{printf("%3s %20s %20s %12s  %s %s",$1,$2,$3,$4,$5,$6);}'
+    echo " ${where}"
+    len=$(echo "${where}" | perl -ne 'print length($_)')
+    echo "--- ---------- ---------------- --------- --------- ------ $len" |\
+      awk '{printf("%3s %20s %20s %12s  %s-%s",$1,$2,$3,$4,$5,$6); for(i=1;i<=$7;i++) printf("-");}'
+    echo ""
+  fi
+elif [[ $total -eq 1 ]] ; then
+  echo "Total $ntables"
+fi
+
+if [[ $widelst -eq 0 ]] ; then
+  for t in $tables
+  do
+    echo "$t"
+  done
+elif [[ $ntables -gt 0 ]] ; then
+  export TMPDIR=${TMPDIR:=/tmp}
+  tmpfile=$TMPDIR/odbls.$$
+  if [[ $sort -ne 0 ]] ; then
+    cat /dev/null > $tmpfile
+    [[ $tty -ne 0 ]] || echo "Gathering information for sorting ..." | perl -pe 's/\n/\r/' >&2
+  fi
+  id=0
+  tot=0
+  totbytes=0
+  totcols=0
+  totrows=0
+  for t in $tables
+  do
+    ((id+=1))
+    ncols=$(egrep "^@$t " $ddfile | cut -f2 -d' ')
+    bytes=$(find $dbdir -type f -name "$t" -follow | $xargs_r ls -l | awk '{s += $5} END { printf("%d\n",s) }')
+    if [[ $simple -eq 2 ]] ; then
+      if [[ $bytes -gt 0 ]] ; then
+        #-- Much faster way (!!) than 'odbsql' currently : fgrep the DCA-file $table.dca directly
+        entry=$(find $dbdir -type f -name "$t.dca" -follow | $xargs_r head -2 | tail -1 | awk '{print $2}')
+        nrows=$(find $dbdir -type f -name "$t.dca" -follow | $xargs_r egrep " $entry " |\
+                awk '{s += $11} END { printf("%d\n",s) }')
+        if [[ $nrows -le 0 ]] ; then
+          #-- Slow (despite well optimized!) way to get the nrows
+          nrows=$(odbsql -BT -i $dbdir -q "select count(*) from $t" 2>/dev/null || echo "-1")
+          [[ "$nrows" != "" ]] || nrows=0
+        fi
+      else
+        nrows=0
+      fi
+    elif [[ $simple -eq 1 ]] ; then
+      nrows=$(odbsql -BT -i $dbdir -q "select count(*) from $t" -p$poolmask 2>/dev/null || echo "-1")
+      [[ "$nrows" != "" ]] || nrows=0
+    elif [[ "$reftbl" = "$t" ]] ; then
+      query="select count(*) from $t where $where"
+      run_query="Running query '$query' ..."
+      [[ $tty -ne 0 ]] || echo "$run_query" | perl -pe 's/\n/\r/' >&2
+      nrows=$(odbsql -BT -i $dbdir -q "$query" -p$poolmask 2>/dev/null || echo "-1")
+      [[ "$nrows" != "" ]] || nrows=0
+      if [[ $tty -eq 0 ]] ; then
+        len=$(echo "${run_query}" | perl -ne 'print length($_)')
+        echo "$len" | awk '{for(i=1;i<=$1;i++) printf(" "); printf("\n")}' | perl -pe 's/\n/\r/' >&2
+      fi
+    else
+      nrows=0
+    fi
+    if [[ $nrows -gt 0 ]] || [[ $zero -eq 1 && $nrows -le 0 ]] ; then
+      ((tot+=1))
+      if [[ $sort -ne 0 ]] ; then
+        echo "$id $t $bytes $ncols $nrows" | awk '{printf("%3d %20s %20d %12d  %s\n",$1,$2,$3,$4,$5);}' >> $tmpfile
+      else
+        echo "$id $t $bytes $ncols $nrows" | awk '{printf("%3d %20s %20d %12d  %s\n",$1,$2,$3,$4,$5);}'
+      fi
+      if [[ $total -eq 1 && $bytes -gt 0 && $nrows -ge 0 ]] ; then
+        ((totbytes+=$bytes))
+        ((totcols+=$ncols))
+        ((totrows+=$nrows))
+      fi
+    fi
+  done
+  if [[ $sort -ne 0 ]] ; then
+    num=4
+    if [[ $sort -gt 0 ]] ; then
+      $mysort -n  +${num} $tmpfile
+    else
+      $mysort -nr +${num} $tmpfile
+    fi   
+    \rm -f $tmpfile
+  fi
+  if [[ $total -eq 1 ]] ; then
+    echo "--- ---------- ---------------- --------- ---------" | awk '{printf("%3s %20s %20s %12s  %s\n",$1,$2,$3,$4,$5);}'
+    echo "$tot ********** $totbytes $totcols $totrows" | awk '{printf("%3d %20s %20d %12d  %s\n",$1,$2,$3,$4,$5);}'
+  fi
+fi
+
+exit 0
+
+
+

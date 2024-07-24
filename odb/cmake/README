@@ -1,0 +1,44 @@
+ODB
+===
+
+A non-relational, distributed, parallel database system designed for handling of large volumes of observational data.
+
+Home page: https://software.ecmwf.int/wiki/display/ODB
+
+Installation
+============
+
+To build ODB software from source, you will need CMake (www.cmake.org).
+
+1. Unpack the source tarball
+
+    $ tar xzf odb-1.0.2-Source.tar.gz
+
+2. Configure your build using CMake
+
+    $ cmake odb-1.0.2-Source
+
+3. Build libraries and tools
+
+    $ make -j<N>
+
+4. Run tests
+
+    $ make check
+
+4. Install
+
+    $ make install
+
+Useful CMake options
+--------------------
+
+-DCMAKE_SHARED_LIBS=OFF # build static libraries
+-DCMAKE_INSTALL_PREFIX=/usr/local/apps/odb # installation directory
+-DODB_SCHEMAS="ECMA;CCMA" # list of schema libraries to build
+
+Setting environment
+===================
+
+    $ export ODB_ROOT=/usr/local/apps/odb
+    $ source $ODB_ROOT/bin/use_odb.sh

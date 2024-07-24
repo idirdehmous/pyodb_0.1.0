@@ -1,0 +1,4 @@
+First 3 bits of body status word
+status@body
+0,-1
+4,4,0 ! Method=4 --> iand(status,4) + 0

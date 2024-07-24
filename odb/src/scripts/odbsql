@@ -1,0 +1,972 @@
+#!/bin/ksh
+
+thisdir=$(pwd)
+
+export TMPDIR=${TMPDIR:=/tmp}
+[ "${ODB_API_VERSION}" != "" ] || export ODB_API_VERSION=$ODB2_VERSION
+
+tmpquery=$TMPDIR/myview_$$.sql
+cmdfile=$TMPDIR/cmdfile.odbsqlmp.$$
+stderr=$TMPDIR/stderr.$$
+errtrg=$TMPDIR/errtrg.$$
+odb98_info=$TMPDIR/odb98.info.$$
+action_dir=$thisdir/dir.$$
+
+trap 'echo "Received signal, aborting ..."; \
+      cat $stderr >&2 || :; \
+      \rm -f $stderr 2>/dev/null < /dev/null || :; \
+      \rm -f $cmdfile 2>/dev/null < /dev/null || :; \
+      \rm -f $tmpquery  2>/dev/null < /dev/null || :; \
+      \rm -f $errtrg  2>/dev/null < /dev/null || :; \
+      \rm -f $odb98_info  2>/dev/null < /dev/null || :; \
+      \rm -rf $action_dir 2>/dev/null < /dev/null || :; \
+      sleep 1; exit 1' \
+      1 2 3 6 15
+
+#begin
+#
+# Usage: odbsql  -q 'data query'      # ODB/SQL data query statement (either this or -v sqlfile must be given)
+#                -v sql_file          # Data query supplied via file
+#               [-h]                  # print this usage and exit
+#               [-F]                  # Force to (re-)create the dca/ -dir
+#               [-I]                  # Display only INFO-data of the data query
+#               [-g]                  # Debugging output on (goes to stderr)
+#               [-k]                  # Convert the sole columns $ODB_LAT & $ODB_LON degrees, if present/applicable
+#               [-K]                  # Do *not* convert the sole columns $ODB_LAT & $ODB_LON degrees (the default)
+#               [-o file[.gz]]        # SQL-output goes to a file (also gzip'ped, if suffix is ".gz")
+#               [-f output_format]    # case insensitive output_format can be "odbtk", "odb" or "default"
+#               [-% fmt_string]       # Alternate format for real-numbers which will override the default; f.ex. -%15.7g
+#                                       For the moment applicable only to '-f default' or '-f odbtk'
+#               [-p pool(s)]          # Use these pools i.e. provide poolmask (as in other ODB-tools)
+#               [-m [start,]maxcount] # Max no. of rows over all pools. If "start" not given, assumed == 1
+#               [-M maxcount]         # Max no. of rows *per pool* to print (triggers auto-use of ODBTk's $__maxcount__!)
+#               [-t table_name]       # Get data from table "directly" ; same as -q 'SELECT * FROM table'
+#               [-D debugger]         # Run program odbsql.x under the "debugger"
+#               [-c]                  # Disable use of curses (also using -q or -v options will disable curses)
+#               [-T]                  # Do *NOT* write column title at all
+#               [-N]                  # Do *NOT* write NULLs, but proper missing data values (same as ODB_PRINT_MDI=0)
+#               [-X]                  # View end result in a separate window
+#               [-b]                  # Show progress bar
+#               [-B]                  # Do *NOT* show progress bar (now the default)
+#               [-U]                  # Do *NOT* attempt to use predefined indices (the same as ODB_USE_INDICES=0)
+#               [-H dr_hook_opt]      # Enable Dr.Hook profiler and export DR_HOOK_OPT with dr_hook_opt
+#               [-C color_map[.cmap]  # Supply color-map file (suffix .cmap or no-suffix); The file is searched from
+#                                       file's directory (if not current_dir), then current_dir, and finally from $ODB_SYSPATH
+#               [-d]                  # Use DUMMY-database from $ODB_SYSDBPATH
+#               [-e error_out_file]   # By default stderr.<process_id>; For some cases maybe useful : -e /dev/null
+#               [-w]                  # Activate wind-arrow plotting : same as -f wplotobs 
+#               [-j]                  # Join consecutive character string columns into name[1:10]@table (-f default only)
+#               [-A plot_area]        # Plotting area; default = -90,-180,90,180[,50e6]  # The 50e6 is Magics map scaling factor
+#               [-P projection]       # Projection ; default = CYLINDRICAL (other: AITOFF, POLAR[_STEREOGRAPHIC], MERCATOR, LAMBERT)
+#               [-i /data/base/dir/DB.sch] # Location of schema file :if not given, try to find from the current dir;
+#                                            if still not found, revert to use DUMMY-database in $ODB_SYSDBPATH
+#                                       New: If you give -i option multiple times -- or the argument for -i contains
+#                                            wildcards [in quotes] (i.e. possibly multiple databases), then the
+#                                            odbdup/odbmerge will be called and the SQL is executed against the odbdup'ped directory
+#               [-n ncpus[.nchunk]]   # If ncpus > 1, tries to run the SQL in several chunks using ncpus and then concatenate results.
+#                                     # Restrictions apply: certain global operations (like stdev), or SELECT DISTINCT, or ORDERBY
+#                                     # may initially be preventing from parallelization.
+#                                     # Since parallelization chunk is a pool-chunk, defining poolmask also will prevent parallelism.
+#                                     # The optional "nchunk" signifies how many pools is given for each parallel subprocess
+#               [-V '$var1=1.5; var2=2.3']  # Overrides $-variable defaults found in SQL; The '$' can be omitted.
+#               [-x executable_name]  # Supply alternative filepath for odbsql.x (for flexible testing purposes only)
+#  
+# Note: Since "curses"-interface is not yet implemented, then using -c option has no effect.
+#
+# However, if you don't supply -o option, but use -f odbtool, then all *binary* ODB-tool output 
+# will go to the default ODB-tool file "temp.000001". The ASCII ODB-tool still goes to
+# "temp_ascii.000001" (and there is currently no way to change this)
+# 
+# The file name in -o option can be parameterized by supplying '%s' and/or '%d' as part of the file name.
+# The '%s' will be replaced by viewname (for each SQL) and '%d' with a pool number in concern.
+# Finally, if .gz suffix is supplied, then output file(s) will be "gzip'ped".
+#
+# When "output_format" is
+#
+#  - "newodb", then create a new odb with format ODB-2.0 (single ODB file); recommended: use also -o file and -i database/path
+#  - "odbtk", then field delimiters become "!,!" and unique column ids ($uniq#)
+#     will be printed as "zero-th" column
+#  - "odb", then "odbviewer"/"odbless" .rpt-file format is emulated (default with -X option)
+#  - "default" (the default), then field delimiter is space (" "), and output is rather compressed
+#  - "binary", then a binary format will be used for output (recommended: use also -o file)
+#  - "plotobs", then $ODB_PLOTTER compatible binary file for Magics will be created
+#  - "wplotobs", then $ODB_PLOTTER compatible binary file for Magics will be created (wind-arrows)
+#  - "odbtool", then input(s) for IDL/odbtool (by Phil Watts while at ECMWF, now in Eumetsat) will be created
+#  For Metview GEO-points : Please make sure your SQL conforms with the -f geo[:xxx] label !
+#  - "geo", then (standard) Metview GEO-points file with "lat long level  date time value"
+#  - "geo:xyv", then also GEO-points file with "x/long y/lat value"
+#  - "geo:xy_vector", then also GEO-points file with "lat lon height date time u v"
+#  - "geo:polar_vector", then also GEO-points file with "lat lon height date time speed direction"
+#  For NetCDF (*new*) :
+#  - "netcdf", then create NetCDF-file with ODB Conventions
+#  - "unetcdf", "unpacked" netcdf : as "netcdf" above, but create without packing
+#    Both NetCDF-options also imply -k i.e. lat/lon are in degrees
+#  Text dump:
+#  - "dump", then similar to "default", but delimiter is comma ","
+#    dump-option also imply -k i.e. lat/lon are in degrees (unless -K had been explicitly given)
+#  Binary dump:
+#  - "bindump", similar to "binary", but all data will be printed row_wise + metadat & title-structure always embedded
+#    Similar to dump-option, it implies  -k i.e. lat/lon are in degrees (unless -K had been explicitly given)
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 06-Nov-2006
+#
+
+set -eu
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+alias cd='\cd'
+
+export ODB_SYSDBPATH=${ODB_SYSDBPATH:=$ODB_SYSPATH/../sysdb}
+export OMP_NUM_THREADS=1
+
+export ODB_NETCDF_NOPACKING=${ODB_NETCDF_NOPACKING:=0}
+
+odbsql2_inputfile=""
+option_odbsql2=""
+odbsql2=-1
+query=""
+query_given=0
+debug=0
+debugverb=""
+create_dca=0
+outfile="/dev/null"
+info_only=0
+poolmask=""
+#dbpath=$thisdir
+dbpath=""
+dbpath_count=0
+schema_file=""
+sqlfile="/dev/null"
+viewname="myview"
+use_curses=1
+start=1
+maxcount=-1
+global_row_count=1
+table=""
+table_given=0
+debugger=""
+format="default"
+format_given=0
+konvert=0
+write_title=1
+export ODB_PRINT_MDI=${ODB_PRINT_MDI:=1} # 1 = print NULLs, 0 = print the actual MDI values
+tty=$(tty -s 2>/dev/null && echo "0" || echo "$?")
+# progress_bar=1 # old default
+progress_bar=0 # new default
+if [[ "${ODB_ARCH:-unknown}" = "nectx" ]] ; then
+  progress_bar=0
+else
+  [[ $tty -eq 0 ]] || progress_bar=0
+fi
+progress_bar_given=0
+b4x=0
+cmap=""
+cmap_given=0
+fmt_string="-"
+export ODB_USE_INDICES=${ODB_USE_INDICES:=1} # 1=use predefined indices, 0=do NOT use them
+drhookopt=""
+dummydb=0
+warrow=""
+joinstr=0
+plot_area=""
+plot_proj=""
+ncpus=1
+varvalue=""
+minusK=0
+altexe="/dev/null"
+exe_given=0
+
+FLAGS=A:bBcC:dD:e:f:FghH:i:IjkKm:M:n:No:p:P:q:t:TUv:V:wx:X%:
+
+abort=no
+while getopts ${FLAGS} i
+do
+  case $i in
+  A) plot_area="$OPTARG";;
+  b) progress_bar_given=1; progress_bar=1;;
+  B) progress_bar_given=1; progress_bar=0;;
+  c) use_curses=0;;
+  C) cmap_given=1; cmap="$OPTARG";;
+  d) dummydb=1;;
+  D) debugger="$OPTARG";;
+  f) format_given=1; format="$OPTARG";;
+  F) create_dca=1;;
+  e) stderr="$OPTARG";;
+  g) debug=1; debugverb="-v -d";;
+  h) abort=yes; break;;
+  H) drhookopt="$OPTARG";;
+  k) konvert=1;;
+  K) konvert=0; minusK=1;;
+  i) ((dbpath_count+=1)); dbpath="$dbpath$OPTARG ";;
+  I) info_only=1;;
+  j) joinstr=1;;
+  m) maxcount="$OPTARG"; global_row_count=1;;
+  M) maxcount="$OPTARG"; global_row_count=0;;
+  n) ncpus="$OPTARG";;
+  N) export ODB_PRINT_MDI=0; option_odbsql2=" -N ";;
+  o) outfile="$OPTARG";;
+  p) poolmask="$poolmask $OPTARG";;
+  P) plot_proj="$OPTARG";;
+  q) use_curses=0; query_given=1; query="$OPTARG";; 
+  t) table_given=1; table=$(echo "$OPTARG"| perl -pe 's#^\@##');;
+  T) write_title=0;;
+  U) export ODB_USE_INDICES=0;;
+  v) use_curses=0; sqlfile="$OPTARG"; viewname=$(basename "$sqlfile" | perl -pe 's/\..*//');;
+  V) varvalue="$varvalue ; $OPTARG";;
+  w) warrow="w"; format_given=1; format="wplotobs";;
+  x) altexe="$OPTARG"; exe_given=1;;
+  X) b4x=1;;
+  %) fmt_string="%$OPTARG";;
+  *) abort=yes; break;;
+  esac
+done
+
+function _with_odb_api {
+  # Attempts to load odb_api module if odb|odb_migrator|odb2netcdf.x tool is not in user's PATH.
+  command -v $1 >/dev/null 2>&1 && return 0
+  command -v module >/dev/null 2>&1 && module --silent load odb_api
+  command -v $1 >/dev/null 2>&1 || {
+    echo "***Error: ODB-API tool '$1' not in your PATH" >&2
+    return 1
+  }
+}
+
+if [[ "$abort" = "no" ]] ; then
+  if [[ "$varvalue" = "" ]] ; then
+    varvalue="-"
+  else
+    varvalue=$(echo "$varvalue" | perl -pe 's/\s*=\s*/=/g; s/\s*[;]+\s*/\n/g; s/^\s+//g; s/[\$]+//g; s/\n/,/g; s/[,]+/,/g;')
+  fi
+
+  if [[ X"${USER:-}" = X ]] ; then
+    export USER=${USER:=$(id -un)}
+  fi
+
+  if [[ X"${ARCH:-}" = X ]] ; then
+    export ARCH=unknown
+  fi
+  test_arch=$(test_arch 2>/dev/null || echo "$ARCH")
+  if [[ "$dbpath" != "" ]] ; then
+# remove leading white spaces
+     dbpath=${dbpath## }
+# remove trailing white spaces
+     dbpath=${dbpath%% }
+     if [[ -f $dbpath ]]; then
+        ascii=$(file $dbpath | grep -i ascii || echo 1)
+        if [[ "$ascii" = "1" ]] ; then
+         odbsql2=1
+         odbsql2_inputfile=$dbpath
+        if [[ $write_title -eq 0 ]] ; then
+         option_odbsql2=" $option_odbsql2 -T "
+        fi
+        if [[ "$format" = "newodb" ]] ; then
+          format=odb
+        fi 
+        fi
+     fi
+  fi
+  if [[ $dbpath_count -eq 0 ]] ; then
+    dbpath=$thisdir
+  else
+    #dbpath=$(echo "$dbpath" | perl -pe 's/\s+$//')
+    #-- Check how many dirs actually ...
+    inpdirs=""
+    dbname=""
+    hasdca=0
+    dbpath_count=0
+    #-- Handle possible wildcard expansions here
+    for db in $(exec 2>/dev/null; /bin/csh -c "/bin/ls -dC1 $dbpath || :")
+    do
+      if [[ -f $db ]] ; then
+        db=$(dirname $db)
+      fi
+      dbn=$(\cd $db >/dev/null 2>&1 && basename $(\ls -C1 *.dd 2>/dev/null | head -1) .dd || echo "")
+      if [[ -f "$db/$dbn.dd" ]] ; then
+        ((dbpath_count+=1))
+        dbname=$dbn
+        inpdirs="${inpdirs}$db "
+        if [[ -d $db/dca ]] ; then
+          ((hasdca+=1))
+        fi
+      fi
+    done
+
+    if [[ $dbpath_count -eq 1 ]] ; then
+      dbpath=$(echo "${inpdirs}" | perl -pe 's/\s+$//')
+    else # This for both $dbpath_count -eq 0 (i.e. $dbname = "") and $dbpath_count -gt 1 
+
+      #-- Use odbdup and create new database dir on the temp disk
+
+      if [[ "$dbname" != "" ]] ; then
+        #-- The "mtimecnt" tries to trace whether input database(s) crucial metadata has changed,
+        #   indicating potential changes in the data itself;
+        #   We could have 'ls -C1sR' through the datapath(s) to calculate the sum of file sizes;
+        #   this could however be potentially very, very time consuming for large amount of files;
+        #   Even now the count of dca-files could be big
+
+        mtimecnt="0.0"
+        for d in ${inpdirs}
+        do
+          if [[ -d $d ]] ; then
+            mtimecnt=$(echo "$mtimecnt" | $ODB_FEBINPATH/odbfiletime.x $d/*.dd $d/*.iomap $d/dca $d/dca/*.dca 2>/dev/null || echo "$mtimecnt")
+          fi
+        done
+
+        ddtag=$($ODB_FEBINPATH/odbmd5sum -D"${inpdirs}")
+
+        if [[ "$test_arch" = linux && -d /dev/shm ]] ; then
+          # Prefer to use RAM-disk (/dev/shm) when available
+          dupdir=/dev/shm
+        elif [[ -d "$TMPDIR" ]] ; then
+          dupdir=$TMPDIR
+        else
+          dupdir=/tmp
+        fi
+        dbpath=${dupdir}/odbsql.${USER}/$dbname.$ddtag.$mtimecnt
+
+        #-- Note: If odbdup'ped database dir already exist, do NOT rerun odbdup
+        #         unless -F option was used, too (re-create dca)
+        if [[ ! -d "$dbpath" ]] || [[ $create_dca -gt 0 ]] ; then
+          opt="-s -F -l $dbname -o $dbpath "
+          if [[ $hasdca -ne $dbpath_count ]] ; then
+            opt="${opt}-Q " # do NOT run dcaquick, since one or more dca/-dirs are missing
+          fi
+          for db in ${inpdirs}
+          do
+            opt="${opt}-i $db "
+          done
+          $ODB_BINPATH/odbdup $opt >&2      
+        fi
+        dbpath_count=1
+        create_dca=0
+      else
+        if [[ $odbsql2 -eq -1 ]] ; then
+          echo "***Error: One or more invalid directories/schema files in '$dbpath'" >&2
+          abort=yes
+          dbpath_count=0
+          dbpath=/dev/null
+        fi
+      fi
+    fi
+  fi # if [[ $dbpath_count -eq 0 ]] ; then
+
+  
+  if [[ $dbpath_count -eq 1 ]] ; then
+    if [[ -f $dbpath ]] ; then
+      schema_file=$dbpath
+      dbpath=$(dirname $dbpath)
+    fi
+  fi
+
+  if [[ -d "$dbpath" ]] ; then
+    \cd $dbpath
+    dbpath=$(pwd)
+    dbname=$(basename $(\ls -C1 *.dd 2>/dev/null | head -1) .dd || echo "")
+    if [[ "$dbname" = ".dd" ]] ; then
+    #  echo "***Error: Unable to locate the main metadata file (.dd) from directory '$dbpath'" >&2
+    #  dbname=""
+    #  abort=yes
+      dummydb=1
+    fi
+    \cd $thisdir
+  else
+    if [[ $odbsql2 -eq -1 ]] ; then
+      echo "***Error: No such database directory/schema file '$dbpath'" >&2
+      dbname=""
+      abort=yes
+    fi
+  fi
+
+  if [[ $dummydb -eq 1 ]] ; then
+    dbname=DUMMY
+    dbpath=$ODB_SYSDBPATH/$dbname
+    schema_file=$dbpath/$dbname.sch
+  fi
+
+  if [[ "$schema_file" = "" ]] ; then
+    schema_file=$dbpath/$dbname.sch
+  fi
+
+  if [[ "$schema_file" -ef "$ODB_SYSDBPATH/DUMMY/DUMMY.sch" ]] ; then
+    dummydb=1
+    dbname=DUMMY
+    dbpath=$ODB_SYSDBPATH/$dbname
+    schema_file=$dbpath/$dbname.sch
+  else
+    dummydb=0
+  fi
+
+  if [[ $table_given -eq 1 ]] ; then
+    if [[ $odbsql2 -eq 1 ]] ; then
+      query="select *"
+    else
+      query='SELECT * FROM '"$table" 
+    fi
+    query_given=1
+  elif [[ "$sqlfile" != "/dev/null" && -r "$sqlfile" ]] ; then
+    query=$(perl -pe 's#(//|--\s+).*##' < $sqlfile) # get rid of the messages after the comment '//' or '-- '
+    query_given=1
+  fi
+
+  if [[ $query_given -eq 0  && $odbsql2 -ne 1 ]] ; then
+    echo "***Error: ODB/SQL data query MUST be given (see use of -q or -v option)" >&2
+    abort=yes
+  else
+    query=$(echo "$query" | perl -pe 's/\n/ /g')
+  fi
+fi
+
+if [[ $odbsql2 -eq 1 ]] ; then
+
+ if [[ $query_given -eq 0 ]] ; then
+   query='select \* from '\\\"$odbsql2_inputfile\\\"';' 
+   query="select *" 
+   query_given=1
+   table_given=1
+   echo "$query" > $TMPDIR/.tmp.sql
+   sqlfile=$TMPDIR/.tmp.sql
+ else
+ 
+ if [[ "$sqlfile" = "/dev/null" ]] ; then
+   echo "$query ;" > $tmpquery
+   sqlfile=$tmpquery
+ fi
+ query_with_input_file=$(grep  $odbsql2_inputfile  $sqlfile || echo "")
+ has_dblequote=$(grep  \"$odbsql2_inputfile\"  $sqlfile || echo "")
+ if [[ "$has_dblequote" = "" ]] ; then
+   sql_request=$(sed 's#'`echo $odbsql2_inputfile`'#"'$odbsql2_inputfile'"#' $sqlfile)
+   echo $sql_request >$sqlfile
+ else
+  odbsql2_ofile=$(basename $odbsql2_inputfile)
+  has_dblequote=$(grep  \"$odbsql2_ofile\"  $sqlfile || echo "" )
+  if [[ "$has_dblequote" = "" ]] ; then
+     sql_request=$(sed 's#'`echo $odbsql2_ofile`'#"'$odbsql2_ofile'"#' $sqlfile)
+     echo $sql_request >$sqlfile
+  fi
+ fi
+
+ fi
+ if [[ "$outfile" = "/dev/null" ]] ; then
+    cat $sqlfile | sed 's/\\\*/\*/g' > ${tmpquery}.new
+    sqlfile=${tmpquery}.new
+    _with_odb_api odb && { odb sql $sqlfile -i $odbsql2_inputfile $option_odbsql2; } || exit 1
+ else
+   if [[  $format_given -eq 1 && "$format" = "odb" ]] ; then
+    cat $sqlfile | sed 's/\\\*/\*/g' > ${tmpquery}.new
+    sqlfile=${tmpquery}.new
+    _with_odb_api odb && { odb sql $sqlfile  -i $odbsql2_inputfile  -f odb -o $outfile $option_odbsql2; } || exit 1
+   elif [[  $format_given -eq 1 && "$format" = "netcdf" ]] ; then
+    cat $sqlfile | sed 's/\\\*/\*/g' > ${tmpquery}.new
+    sqlfile=${tmpquery}.new
+    _with_odb_api odb && { odb sql $sqlfile  -i $odbsql2_inputfile  -f odb -o $TMPDIR/.tmp.odb $option_odbsql2; } || exit 1
+    _with_odb_api odb2netcdf.x && { odb2netcdf.x -i $TMPDIR/.tmp.odb -o $outfile; } || exit 1
+   else
+    cat $sqlfile | sed 's/\\\*/\*/g' > ${tmpquery}.new
+    sqlfile=${tmpquery}.new
+    _with_odb_api odb && { odb sql $sqlfile  -i $odbsql2_inputfile $option_odbsql2  > $outfile; } || exit 1
+   fi
+ fi
+ rc=0
+else
+if [[ ! -r "$schema_file" ]] ; then
+  echo "***Error: Database schema file '$schema_file' is not readable and/or available" >&2
+  abort=yes
+fi
+
+# ... and to avoid possible gdb/dbx hangs ...
+export GNUDEBUGGER=0
+export DBXDEBUGGER=0
+
+if [[ "$abort" = "no" ]] ; then
+  #-- Set DUMMY-database credentials ...
+  if [[ $dummydb -eq 1 ]] ; then
+    export ODB_SRCPATH_DUMMY=$dbpath
+    export ODB_DATAPATH_DUMMY=$dbpath
+    export ODB_IDXPATH_DUMMY=/dev/null
+    export IOASSIGN=$dbpath/DUMMY.IOASSIGN
+    create_dca=0
+    #-- No parallelism
+    ncpus=1
+  else 
+    # Set SRCPATH/DATAPATH/IDXPATH-stuff
+    export ODB_SRCPATH_${dbname}=$dbpath
+    export ODB_DATAPATH_${dbname}=$dbpath
+    export ODB_IDXPATH_${dbname}=$dbpath/idx
+    # (re-)set IOASSIGN even if set from outside already
+    if [[ -f $dbpath/$dbname.IOASSIGN ]] ; then
+      export IOASSIGN=$dbpath/$dbname.IOASSIGN
+    elif [[ -f $dbpath/IOASSIGN ]] ; then
+      export IOASSIGN=$dbpath/IOASSIGN
+    elif [[ -f $dbpath/IOASSIGN.$dbname ]] ; then
+      export IOASSIGN=$dbpath/IOASSIGN.$dbname
+    else
+      echo "***Error: Unable to locate corresponding IOASSIGN-file for database '$dbname'" >&2
+      abort=yes
+    fi
+  fi
+fi
+
+if [[ "$abort" = "no" ]] ; then
+  #-- Set analysis date & time
+  ddfile=$dbpath/$dbname.dd
+  if [[ -f $ddfile ]] ; then
+    if [[ ${BASETIME:-no} = no ]] ; then
+      yyyymmddhh=$(head -4 $ddfile | tail -1 | awk '{printf("%8.8d%2.2d\n",$1,$2/10000);}')
+    else
+      yyyymmddhh=$BASETIME
+    fi
+    export ODB_ANALYSIS_DATE=$(echo $yyyymmddhh | cut -c1-8)
+    export ODB_ANALYSIS_TIME="$(echo $yyyymmddhh | cut -c9-10)0000"
+    npools=$(head -5 $ddfile | tail -1)
+  else
+    echo "***Error: Data dictionary file '$ddfile' not found" >&2
+    abort=yes
+  fi
+fi
+
+#-- Abort
+if [[ "$abort" = "yes" ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//' >&2
+  exit 1
+fi
+
+#-- Make sure the .odbprune_done file exists; if not, generate it (this should be very quick)
+if [[ $dummydb -eq 0 ]] ; then
+  if [[ ! -f $dbpath/.odbprune_done ]] ; then
+    odbprune -i $dbpath >/dev/null 2>&1 || :
+  fi
+
+  if [[ $create_dca -eq 0 ]] ; then
+  #-- Fix dca-indices in-place
+    if [[ ! -f $dbpath/dca/.dcafixed ]] ; then
+      dcafix -q -i $dbpath >/dev/null 2>&1 || :
+    fi
+  fi
+fi
+
+format=$(echo "$format" | perl -pe 'tr/A-Z/a-z/')
+
+if [[ "$format" = "unetcdf" ]] ; then
+  export ODB_NETCDF_NOPACKING=1
+  format=netcdf
+fi
+
+if [[ "$format" = @(dump|bindump) ]] ; then
+  if [[ $konvert -eq 0 && $minusK -eq 0 ]] ; then
+    konvert=1 # apply -k (and no -K was supplied)
+  fi
+fi
+
+rc=0
+if [[  $format_given -eq 1 && "$format" = "newodb"  && $odbsql2 -eq -1 ]] ; then
+    if [[ "$outfile" = "/dev/null" ]] ; then
+      if [[ "$sqlfile" != "/dev/null" ]] ; then
+        view=$(basename "$sqlfile" | perl -pe 's/\..*//')
+      else
+        view=$viewname
+      fi
+      outfile=${view}.odb
+    fi
+    if [[ "$sqlfile" = "/dev/null" ]] ; then
+      echo "$query ;" > $tmpquery
+      sqlfile=$tmpquery
+    fi
+    if [[ -f $dbpath/$dbname.flags ]] ; then
+      export ODB_COMPILER_FLAGS=$dbpath/$dbname.flags
+    fi
+    if [[ "$plot_area" != "" ]] ; then
+      add_columns="-addcolumns $plot_area"
+    else
+      add_columns=""
+    fi
+    _with_odb_api odb_migrator && { odb_migrator $add_columns $dbpath $sqlfile $outfile >&2; } || exit 1
+else
+if [[ $format_given -eq 1 && "$format" = "netcdf" ]] ; then
+      if [[ "$sqlfile" != "/dev/null" ]] ; then
+        view=$(basename "$sqlfile" | perl -pe 's/\..*//')
+      else
+        view=$viewname
+      fi
+      outfile=${view}.nc
+    if [[ "$sqlfile" = "/dev/null" ]] ; then
+      echo "$query ;" > $tmpquery
+      sqlfile=$tmpquery
+    fi
+
+    _with_odb_api odb_migrator && { odb_migrator $dbpath $sqlfile $TMPDIR/${view}.odb >&2; } || exit 1
+    _with_odb_api odb2netcdf.x && { odb2netcdf.x -i $TMPDIR/${view}.odb -o $outfile; } || exit 1
+    Exe=""
+    #-- All ready for NetCDF-file creation
+    b4x=0
+    odbsql2=0
+else
+  rc=1
+  nccatExe=/dev/null
+fi
+
+if [[ $rc -ne 0 ]] ; then
+  if [[ $exe_given -eq 0 ]] ; then
+    if [[ "$debugger" != "" ]] ; then
+      Exe=$ODB_FEBINPATH/odbsql.x
+    else
+      Exe=$ODB_BEBINPATH/odbsql.x
+    fi
+  else
+    Exe=$altexe
+  fi
+  rc=0
+fi
+
+gzip=$(whence gzip 2>/dev/null || echo "")
+export ODB_GZIP=${ODB_GZIP:=$gzip}
+
+echo "$query ;" > $tmpquery
+
+if [[ -f $dbpath/$dbname.flags ]] ; then
+  export ODB_COMPILER_FLAGS=$dbpath/$dbname.flags
+fi
+
+export ODB98_VIEWNAME=$viewname
+export ODB98_DBPATH=$dbpath
+
+rc=0
+if [[ $info_only -eq 1 ]] ; then
+  if [[ "$debugger" != "" ]] ; then
+    echo "Run the debugger '$debugger' with the following arguments:"
+    echo "$debugverb -F2 -Q $tmpquery $schema_file"
+    $debugger $ODB_FEBINPATH/odb98.x
+    rc=1
+  else
+    $ODB_FEBINPATH/odb98.x $debugverb -F2 -Q $tmpquery $schema_file || rc=$?
+  fi
+else
+  if [[ "$poolmask" != "" ]] ; then
+    poolmask=$(echo $poolmask | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g')
+    export ODB_PERMANENT_POOLMASK="$poolmask"
+    # echo "==> ODB_PERMANENT_POOLMASK=$ODB_PERMANENT_POOLMASK" >&2
+    if [[ "$poolmask" != "-1" ]] ; then
+      ncpus=1 # no parallelism
+    else
+      unset ODB_PERMANENT_POOLMASK
+    fi
+  fi
+
+  if [[ $dummydb -eq 0 ]] ; then
+    rmdir $dbpath/dca 2>/dev/null </dev/null || :
+    if [[ ! -d $dbpath/dca ]] ; then
+      create_dca=2
+    fi
+  fi
+
+  if [[ $create_dca -ge 1 ]] ; then
+    slash2dot=$(echo $dbpath | sed 's%/%\.%g')
+    ddtag=$($ODB_FEBINPATH/odbmd5sum $ddfile | awk '{print $1}')
+
+    if [[ "$test_arch" = linux && -d /dev/shm ]] ; then
+      # Prefer to use RAM-disk (/dev/shm) when available
+      dupdir=/dev/shm
+    elif [[ -d "$TMPDIR" ]] ; then
+      dupdir=$TMPDIR
+    else
+      dupdir=/tmp
+    fi
+    dupdir=${dupdir}/$dbname.${USER}${slash2dot}.${ddtag}
+    dupdir=`echo $dupdir | perl -pe 's/-//g'`  # remove  '-' from directory name for consistency with odbdup which also removes these
+
+    if [[ -d $dupdir && -d $dupdir/dca && -r $dupdir/$dbname.sch ]] ; then
+      # Do nothing, since all the necessary stuff available presumably from the previous run
+      :
+    else
+      # Run odbdup to create a "virtual database", which doesn't mess up with the original directory
+      if [[ $create_dca -eq 2 ]] ; then
+        bigQ="-Q"  # do *NOT* use the dcaquick, since input database didn't have any dca/ -dir
+      else
+        bigQ=""
+      fi
+      $ODB_BINPATH/odbdup -s -F -i $dbpath -o $dupdir -l $dbname $bigQ >&2
+    fi
+
+    # Revert dbpath to point to the $dupdir
+    dbpath=$dupdir
+    export ODB_SRCPATH_${dbname}=$dbpath
+
+    # Redefine schema-file
+    schema_file=$dbpath/$dbname.sch
+  fi # if [[ $create_dca -ge 1 ]] ; then
+
+  #-- Produce report window if -X (and unless -f plotobs or -f wplotobs)
+
+  if [[ $b4x -eq 1 ]] ; then
+    if [[ x${DISPLAY:-} = x ]] ; then
+      b4x=0
+    elif [[ $format_given -eq 1 && "$format" = @(plotobs|wplotobs) ]] ; then
+      :
+    else
+      if [[ "$outfile" = "/dev/null" ]] ; then
+        if [[ "$sqlfile" != "/dev/null" ]] ; then
+          view=$(basename "$sqlfile" | perl -pe 's/\..*//')
+	  outfile=${view}.rpt
+	else
+          outfile="%s.rpt"
+        fi
+      fi
+      export ODB_REPORTER=${ODB_REPORTER:="$ODB_FEBINPATH/b4.x"}
+      if [[ $format_given -eq 0 ]] ; then
+        format="odb"
+      fi
+      if [[ $progress_bar_given -eq 0 ]] ; then
+        progress_bar=1
+      fi
+    fi
+  fi
+
+  #-- Plotting
+
+  # Some default env-values :
+
+  export ODB_DATE=${ODB_DATE:="date@hdr"}
+  export ODB_TIME=${ODB_TIME:="time@hdr"}
+
+  export ODB_LAT=${ODB_LAT:="lat@hdr"}
+  export ODB_LON=${ODB_LON:="lon@hdr"}
+
+  #  Color map -file, if given
+  if [[ $cmap_given -eq 1 ]] ; then
+    # The color map file MUST have a suffix ".cmap"; and it will be enforced here:
+    cmap=$(dirname "$cmap")/$(basename "$cmap" .cmap)".cmap"
+    if [[ ! -r "$cmap" ]] ; then
+      cmap=$ODB_SYSPATH/$(basename "$cmap")
+      if [[ ! -r "$cmap" ]] ; then
+        cmap_given=0 # giving up ...
+      fi
+    fi
+  fi
+
+  if [[ $cmap_given -eq 1 && -r "$cmap" ]] ; then
+    export ODB_COLOR=$(head -2 "$cmap" | tail -1 | perl -pe 's/^\s+//')
+  else
+    if [[ "$warrow" = "w" ]] ; then
+      export ODB_COLOR=${ODB_COLOR:="speed"}
+    else
+      export ODB_COLOR=${ODB_COLOR:="obsvalue@body"}
+    fi
+    cmap="/dev/null"
+  fi
+
+  #-- In case of wind-arrow plots ...
+  export ODB_U=${ODB_U:="obsvalue@body"}
+  export ODB_V=${ODB_V:="obsvalue@body#1"}
+ 
+  # Determine if (lat,lon) are in radians, degrees or cannot be determined.
+  # This means that the ODB_LATLON_RAD is 1, 0 and -1, respectively
+  # Needed for functions lldegrees()/llradians() used heavily by the ODBTk
+  #-- Obsolete; done inside odbsql.x, *ONLY* if needed i.e. if $ODB_LAT & $ODB_LON present as well as 
+  # references to lldegrees()/llradians functions
+  # export ODB_LATLON_RAD=${ODB_LATLON_RAD:=$(\cd $dbpath >/dev/null 2>&1; $ODB_FEBINPATH/latlon_rad || echo "-1")}
+
+  if [[ $format_given -eq 1 && "$format" = @(plotobs|wplotobs) ]] ; then
+    #-- plotobs or wplotobs
+    if [[ "$outfile" = "/dev/null" ]] ; then
+      if [[ "$sqlfile" != "/dev/null" ]] ; then
+        view=$(basename "$sqlfile" | perl -pe 's/\..*//')
+        outfile=${view}.obs
+      else
+        outfile="${viewname}.obs"
+      fi
+    fi
+
+    export ODB_PLOTTER=${ODB_PLOTTER:="$ODB_FEBINPATH/plotobs.x -b"}
+    #-- Force immediate plotting, if -X was also given
+    if [[ $b4x -eq 1 ]] ; then
+      export ODB_PLOTTER=$(echo "$ODB_PLOTTER" | sed 's/ -b/ -s -b/')
+    fi
+
+    if [[ "$format" = wplotobs ]] ; then
+      export ODB_PLOTTER=$(echo "$ODB_PLOTTER" | sed 's/ -b/ -W -b/')
+    fi
+
+    if [[ "$plot_area" != "" ]] ; then
+      export ODB_PLOTTER=$(echo $ODB_PLOTTER | sed "s/ -b/ -a'$plot_area' -b/")
+    fi
+
+    if [[ "$plot_proj" != "" ]] ; then
+      export ODB_PLOTTER=$(echo $ODB_PLOTTER | sed "s/ -b/ -p$plot_proj -b/")
+    fi
+
+    if [[ $progress_bar_given -eq 0 ]] ; then
+      progress_bar=1
+    fi
+    export MAGICS_DEVICE=${MAGICS_DEVICE:="JPEG"}  # Can be f.ex. "PS_COL", "PNG", "GIF"
+
+  elif [[ $format_given -eq 1 && "$format" = "odbtool" ]] ; then
+  #-- odbtool
+    if [[ "$outfile" = "/dev/null" ]] ; then
+      outfile="temp.000001"
+    fi
+  fi
+
+  #-- Figure out the "start" from maxcount
+
+  num=$(echo "$maxcount" | awk -F, '{print NF}')
+  if [[ $num -eq 1 ]] ; then
+    start=1
+  elif [[ $num -gt 1 ]] ; then
+    start=$(echo "$maxcount" | awk -F, '{print $1}')
+    [[ "$start" != "" ]] || start=1
+    end=$(echo "$maxcount" | awk -F, '{print $2}')
+    if [[ "$end" == "" ]] ; then
+      maxcount=-1
+#    elif [[ $end -lt 0 ]] ; then
+#      maxcount=-1
+    else
+      maxcount=$((start+end-1))
+    fi
+  fi
+
+  if [[ $maxcount -eq 2147483647 ]] ; then # max no of rows permitted to output (= 2^31 - 1)
+    maxcount=-1
+  fi
+
+  if [[ $start -ne 1 ]] || [[ $maxcount -ne -1 ]] ; then
+    ncpus=1
+  fi
+
+  nchunk=$(echo "$ncpus" | perl -ne 'print $1 if (m/^.*[.](\d+).*/) || print 0')
+  ncpus=$(echo "$ncpus" | perl -pe 's/^(\d+).*/$1/')
+
+  if [[ $ncpus -gt $npools ]] ; then
+    ncpus=$npools # A rare situation, but ...
+  fi
+
+#-- Create info-file once to be fed in in parallel invocations of odbsql.x
+  if [[ $ncpus -gt 1 && $debug -eq 0 && "$debugger" = "" ]] ; then
+    export ODB98_INFO=$odb98_info
+    $ODB_FEBINPATH/odb98.x -F2 -Q $tmpquery $schema_file > $odb98_info || {
+      rc=$?
+      \rm -f $tmpquery  2>/dev/null < /dev/null || :
+      \rm -f $odb98_info  2>/dev/null < /dev/null || :; \
+      exit $rc
+    }
+    cat >> $odb98_info <<EOF
+/dir=$dbpath
+/host=$(hostname)
+/tstamp=$(date)
+EOF
+
+    #-- Switch $ncpus back to 1, if any of the following is found true (n > 0) :
+    # /has_select_distinct=1
+    # /has_aggrfuncs=1
+    # /has_thin=1
+    # /orderby n
+    # /uniqueby n
+
+    typeset x=$(perl -ne 'if (m#^/(has_select_distinct|has_aggrfuncs|has_thin)=1#) { print 1; exit; } elsif (m#^/(orderby|uniqueby)\s+(\d+)# && $2 > 0) { print $2; exit; }' $odb98_info || :)
+
+    if [[ "$x" != "" ]] ; then
+      ncpus=1
+      unset ODB98_INFO
+    fi
+  else
+    export ODB98_INFO=/dev/null
+    unset ODB98_INFO
+  fi
+
+  #-- Developers backdoor to supply a fixed info-file; be very careful with this !!
+  #   This essentially bypasses odb98.x altogether
+  #   Creation process can be as follows:
+  #    (0) cd /data/base/direc/tory/ECMA.whateva
+  #    (1) odbsql -q 'some query' -I > odb98.info
+  #    (2) edit odb98.info # fix the problem by hand
+  #    (3) env ODB98_INFO_OVERRIDE=odb98.info odbsql -q 'some query' -o result.file
+  #   If "result.file" is what you expected, your hand-patch has worked.
+  #   After this you [or your good friend!] would normally have to fix the odb98-compiler itself ;-(
+
+  if [[ X"${ODB98_INFO_OVERRIDE:-}" != X ]] ; then
+    if [[ -r "${ODB98_INFO_OVERRIDE}" ]] ; then # the file is indeed readable ...
+      export ODB98_INFO="${ODB98_INFO_OVERRIDE}"
+    fi
+  fi  
+
+  #-- Dr.Hook profiling ?
+
+  if [[ $ncpus -eq 1 ]] ; then
+    if [[ "$drhookopt" != "" ]] ; then
+      export DR_HOOK=true
+      export DR_HOOK_OPT="$drhookopt"
+    else
+      export DR_HOOK_OPT="none"
+    fi
+  fi
+
+  #-- Run
+
+  if [[ "$debugger" != "" ]] ; then
+    echo "Run the debugger '$debugger' with the following arguments:"
+    echo "$schema_file $tmpquery $start $maxcount $debug $konvert $format \
+$outfile $write_title $global_row_count $progress_bar $b4x $cmap $fmt_string $joinstr $varvalue" >&2
+    $debugger $Exe
+    rc=1 # Ensure non-zero exit code from debugger runs
+  else
+    if [ $odbsql2 -eq -1 ] ; then
+    #-- Not running under the debugger
+    do_cmd_1="$Exe $schema_file"
+    do_cmd_2="$start $maxcount $debug $konvert $format $outfile $write_title $global_row_count $progress_bar $b4x $cmap $fmt_string $joinstr $varvalue"
+    if [[ $debug -eq 0 ]] ; then
+      \rm -f $stderr 2>/dev/null < /dev/null || :
+      if [[ "${ODB_ARCH:-unknown}" = "nectx" ]] ; then
+        cat <<EOF | odbqsub -N odbsql$$ || rc=$?
+$do_cmd_1 $tmpquery $do_cmd_2 2>$stderr || rc=\$?
+[[ \$rc -eq 0 ]] || cat $stderr
+rm -f $stderr
+EOF
+      elif [[ $ncpus -eq 1 ]] ; then
+        $do_cmd_1 $tmpquery $do_cmd_2 2>$stderr || {
+          rc=$?
+          cat $stderr >&2 || :
+        }
+        \rm -f $stderr 2>/dev/null < /dev/null || :
+      else
+        perl -w $ODB_FEBINPATH/odbsqlmp.pl \
+           --ncpus $ncpus --nchunk $nchunk --npools $npools --workdir $action_dir \
+           --executable $Exe --nccat $nccatExe \
+           --schema $schema_file --query $tmpquery \
+           --konvert $konvert --format $format \
+           --outfile $outfile --write_title $write_title \
+           --b4x $b4x --cmap $cmap --fmt_string "$fmt_string" --joinstr $joinstr \
+           --error_trigger $errtrg --varvalue "$varvalue" \
+           2>$stderr > $cmdfile || rc=$?
+        if [[ $rc -eq 0 ]] ; then
+          nmaxcmd=$(wc -l $cmdfile)
+          env ODB_PARAL=$ncpus FSCHEDULER_PBAR=$progress_bar $ODB_BINPATH/fscheduler.x $nmaxcmd 2>>$stderr || rc=$?
+          if [[ -f $errtrg ]] ; then
+            rc=255
+          fi
+        fi
+        if [[ $rc -ne 0 ]] ; then
+          cat $stderr >&2 || :
+        fi
+
+        \rm -f $errtrg 2>/dev/null < /dev/null || :
+        \rm -f $stderr 2>/dev/null < /dev/null || :
+        \rm -f $cmdfile 2>/dev/null < /dev/null || :
+	\rm -rf $action_dir 2>/dev/null < /dev/null || :
+      fi
+    else
+      if [[ "${ODB_ARCH:-unknown}" = "nectx" ]] ; then
+	echo "$do_cmd_1 $tmpquery $do_cmd_2 2>&1 || rc=\$?" | odbqsub -N odbsql$$ || rc=$?
+      else
+        $do_cmd_1 $tmpquery $do_cmd_2 2>&1 || rc=$?
+      fi
+    fi
+   fi
+  fi
+ fi
+fi
+fi
+
+\rm -f $tmpquery  2>/dev/null < /dev/null || :
+\rm -f $odb98_info  2>/dev/null < /dev/null || :; \
+exit $rc

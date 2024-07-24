@@ -1,0 +1,166 @@
+#!/bin/ksh
+#
+# A script to invoke C/C++-compilation with correct ODB-include path.
+#
+# Usage: odbcc [flags] c-file(s) [object(s)]
+#        odbc++ [flags] c++-file(s) [object(s)]
+#
+#       (can't have odbCC, since Windows/CYGWIN maps it to odbcc)
+#
+# Author: Sami Saarinen, ECMWF, 2003-2004, 2006, 2008
+#
+# Now also for linking C/C++-programs
+#
+
+if [[ $# -lt 1 ]] ; then
+  head -13 $0 | tail -12
+  exit 1
+fi
+
+#-- Is this script odbcc or odbc++ (or even obsolescent odbCC on non-cygwin) ?
+is_cxx=$(basename $0 | sed 's/.*\(CC|c++\)$/CC/')
+
+#-- gprof style profiling on ? Set this externally to "-pg" to enable gprof
+ODB_GPROF=${ODB_GPROF:=""}
+
+ODB_ARCH=${ODB_ARCH:="$ARCH"}
+test_arch=$(test_arch 2>/dev/null || echo "unknown")
+
+#MPICH_ROOT=${MPICH_ROOT:=/vol/rdx_dir/mpi/suse90/mpich-1.2.7} # for CPU_TYPE=amd64
+MPICH_ROOT=${MPICH_ROOT:=/not/available}
+
+#-- See also use_odb/use_odb.sh -scripts whether $LIBNETCDF was already set there
+if [[ "$ODB_ARCH" = @(ibm_power*) ]] ; then
+  LIBNETCDF=${LIBNETCDF:=/usr/local/lib/netcdf/current/lib/libnetcdf.a}
+  netcdfinc="/usr/local/lib/netcdf/current/include/netcdf.h"
+else
+  LIBNETCDF=${LIBNETCDF:=/usr/local/apps/netCDF/current/lib/libnetcdf.a}
+  netcdfinc="/usr/local/apps/netCDF/current/include/netcdf.h"
+fi
+
+if [[ -f "$LIBNETCDF" ]] ; then
+  typeset cxxtoo=""
+  if [[ "$is_cxx" = CC ]] ; then # in case of odbc++
+    typeset cxxfile="$(dirname $LIBNETCDF)/libnetcdf_c++.a"
+    if [[ -f $cxxfile ]] ; then
+      cxxtoo=" -l$(basename $cxxfile | perl -pe 's/^lib//; s/\..*//;')"
+    fi
+  fi
+  netcdflib="-L$(dirname $LIBNETCDF)$cxxtoo -l$(basename $LIBNETCDF | perl -pe 's/^lib//; s/\..*//;')"
+else
+  netcdflib=""
+fi
+
+if [[ -f "$netcdfinc" ]] ; then
+  netcdfinc="-I$(dirname $netcdfinc)"
+else
+  netcdfinc="-I${ODB_SYSPATH}"
+fi
+
+odbglue="_odb_glue.o"
+[[ -f $odbglue ]] || odbglue=""
+
+compile_only=0
+for arg in $*
+do
+  if [[ "$arg" = "-c" ]] ; then
+    odbglue=""
+    compile_only=1
+    break
+  fi
+done
+
+addargs=""
+if [[ $compile_only -eq 0 ]] ; then
+  #-- create automatically odb-glue from (possible) -lDBNAME information
+  #-- first: merge possible "-l<space>XXX" into "-lXXX"
+  newargs=$(echo "$*" | perl -pe 's/-l\s+/-l/g');
+  dbnames=""
+  for arg in $newargs
+  do
+    if [[ "$(echo $arg | cut -c1-2)" = "-l" ]] ; then
+      db=$(echo $arg | cut -c3-)
+      DB=$(echo $db | perl -pe 's/\s+//g; s/\..*$//; s/[_-]//g; tr/a-z/A-Z/')
+      if [[ "$db" = "$DB" ]] ; then
+        dbnames="$dbnames $db"
+        # A big thanks to ttl 27/04/2006 for the idea of including -L$ODB_SRCPATH_<dbname> !!
+        typeset testvar=ODB_SRCPATH_${db}
+        typeset testvalue=$(eval echo \$$testvar 2>/dev/null || :)
+        if [[ "$testvalue" != "" && -d "$testvalue" ]] ; then
+          addargs="$addargs-L$testvalue "
+        fi
+      fi
+    fi
+  done
+  if [[ "$dbnames" != "" ]] ; then
+    create_odbglue $dbnames
+    odbglue="_odb_glue.o"
+  fi
+fi
+
+if [[ "$is_cxx" = CC ]] ; then
+  export ODB_CPLUSPLUS=${ODB_CPLUSPLUS:=c++}
+  cmd=${ODB_CPLUSPLUS}
+else
+  cmd=${ODB_CC}
+fi
+
+rc=0
+args=""
+for arg in $*
+do 
+  if [[ "$arg" = "-glue" ]] ; then
+    args="$args$odbglue "
+    odbglue=""
+  elif [[ "$(echo $arg | cut -c1-2)" = "-l" ]] ; then # insert -L's in-front of the first -l
+    args="$args$addargs$arg "
+    addargs=""
+  elif [[ "$(echo $arg | perl -pe 's/^.*\.(a|so|o)\b$/$1/')" = @(a|so|o) ]] ; then
+    args="$args$arg $odbglue "
+    odbglue=""
+  elif [[ "$(echo $arg | perl -pe 's/^.*\.(c)\b$/$1/')" = @(c) ]] ; then
+    if [[ "$is_cxx" = CC ]] ; then
+      odbcc -c $arg || rc=1
+      arg=$(echo $arg | sed 's/\.c/.o/')
+    fi
+    args="$args$arg $odbglue "
+    odbglue=""
+  elif [[ "$(echo $arg | perl -pe 's/^.*\.(cc)\b$/$1/')" = @(cc) ]] ; then
+    if [[ "$is_cxx" != CC ]] ; then
+      odbc++ -c $arg || rc=1
+      arg=$(echo $arg | sed 's/\.cc/.o/')
+    fi
+    args="$args$arg $odbglue "
+    odbglue=""
+  elif [[ "$(echo $arg | perl -pe 's/^.*\.(F|F90|f|f90)\b$/$1/')" = @(F|F90|f|f90) ]] ; then
+    odbf90 -c $arg || rc=1
+    arg=$(echo $arg | perl -pe 's/\.(F|F90|f|f90)/.o/g')
+    args="$args$arg $odbglue "
+    odbglue=""
+  else
+    args="$args$arg "
+  fi
+done
+
+if [[ $rc -ne 0 ]] ; then
+  echo "***Error: There were problem(s) in compiling C/C++ files" >&2
+  exit $rc
+fi
+
+cmd="$cmd $ODB_GPROF"
+
+if [[ $compile_only -eq 1 ]] ; then
+  echo $cmd $netcdfinc $args >&2
+  exec $cmd $netcdfinc $args >&2
+else
+  if [[ "${ODB_FCLIBS:-}" = "" ]] ; then
+    if [[ -r $ODB_SYSPATH/ODB_FCLIBS ]] ; then
+      export ODB_FCLIBS=$(head -1 $ODB_SYSPATH/ODB_FCLIBS 2>/dev/null || echo "")
+    fi
+  fi
+  echo $cmd $netcdfinc -L. $args $odbglue $ODB_LIB $ODB_FCLIBS >&2
+  exec $cmd $netcdfinc -L. $args $odbglue $ODB_LIB $ODB_FCLIBS >&2
+fi
+
+#-- should never end up here
+exit 1

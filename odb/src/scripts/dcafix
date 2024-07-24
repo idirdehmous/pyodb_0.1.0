@@ -1,0 +1,78 @@
+#!/bin/ksh
+# 
+# Usage: dcafix [-i datapath] [-v] [-q] [dca/hdr.dca [dca/body.dca] ... ]
+#
+
+set -eu
+
+datapath="."
+datapath_opt=""
+verbose=0
+verbose_opt=""
+quiet_opt=""
+
+while getopts i:qv  option
+do
+  case $option in
+    i) datapath="$OPTARG";;
+    v) quiet_opt=""  ; verbose=1; verbose_opt="-v";;
+    q) quiet_opt="-q"; verbose=0; verbose_opt=""  ;;
+  esac
+done
+
+if [[ -f $datapath/dca/.dcafixed ]] ; then
+#-- Already dcafix'ed --> do nothing
+  exit 0
+fi
+
+datapath_opt="-i $datapath $verbose_opt $quiet_opt"
+
+shift $(expr $OPTIND - 1)
+
+if [[ $# -gt 0 ]] ; then
+  args=$*
+  all=0
+else
+  args="dca/*.dca"
+  all=1
+fi
+
+\cd $datapath || exit 1
+
+for f in $args
+do
+  if [[ -f $f ]] ; then
+    begin_hash=$(dd bs=1 if=$f count=1 2>/dev/null || :)
+    if [[ "$begin_hash" = '#' ]] ; then
+      line=$(egrep '^#DCA:' $f 2>/dev/null | head -1)
+    else
+      line="" # the file is presumably a binary DCA-file --> no need for dcafix'ing
+    fi
+    if [[ ! -z "$line" ]] ; then
+      [[ $verbose -eq 0 ]] || echo "Fixing DCA for file $f ..."
+      check=$(echo "$line" | sed 's/^.*\(is_little\).*/\1/') # a further check; a 28R1-bug
+      [[ $verbose -eq 0 ]] || echo "line='$line'"
+      [[ $verbose -eq 0 ]] || echo "check='$check'"
+      if [[ "$check" = "is_little" ]] ; then
+        env DATAPATH=$datapath perl -w $ODB_BINPATH/dcafix.pl < $f > $f.new
+        mv $f $f.old
+        mv $f.new $f
+      elif [[ $all -eq 1 ]] ; then
+        all=2
+        break # for f in $args
+      else # Re-generate quickly ...
+        table=$(basename $f | sed 's/\..*//')
+        dcagen -z -F -n -t $table $datapath_opt 
+      fi
+    fi
+  fi
+done
+
+if [[ $all -ge 1 ]] ; then
+  if [[ $all -eq 2 ]] ; then
+    #-- Uses multiple processes 
+    dcagen -z -F -n $datapath_opt
+  fi
+  cat /dev/null > dca/.dcafixed
+fi
+

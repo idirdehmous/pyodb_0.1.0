@@ -1,0 +1,185 @@
+#!/bin/ksh
+#
+# A script to create XY-plot using GNUplot from a given report-file
+# and across two columns
+#
+#
+# Usage:  odbxyplot [-x column#1]    : X-coordinate  : default = 1
+#                   [-y column#2]    : Y-coordinate  : default = 2
+#                   [-t column#2]    : time-coordinate  : default = 0
+#                   [-d device]      : Output device : default = x11
+#                   [-o output_file] : Output file (if not device x11)
+#                   [-v]             : verbose       : default = noverbose
+#                   [-O GNUplot_options] : default = no extra options
+#                   [-i input_file]  : Input file
+#                   [input_file]
+#
+#
+
+set -eu
+
+usage1="odb_xyplot [-v] [-x col#x] [-y col#y] [-t col#time]"
+usage2="           [-d device] [-o output] [-O options] [-i input_file] [input_file]"
+
+FLAGS=x:y:t:d:o:i:vO:
+
+cx=1
+cy=2
+ct=0
+device=x11
+output=
+input=
+verbose=0
+options=
+
+abort=no
+while getopts ${FLAGS} i
+do
+  case $i in
+  x)	cx="$OPTARG";;
+  y)	cy="$OPTARG";;
+  t)	ct="$OPTARG";;
+  d)	device="$OPTARG";;
+  o)	output="$OPTARG";;
+  i)	input="$OPTARG";;
+  v)	verbose=1;;
+  O)	options="$OPTARG";;
+  *)    abort=yes; break;;
+  esac
+done
+
+shift $(expr $OPTIND - 1)
+
+[[ $# -ne 1 ]] || input=$1
+
+[[ "$input" != "" ]] || abort=yes
+
+gnuplot=$(whence gnuplot 2>/dev/null || echo "")
+
+if [[ "$gnuplot" = "" ]] ; then
+  echo "***Error: gnuplot not installed" >&2
+  abort=yes
+elif [[ ! -x "$gnuplot" ]] ; then
+  echo "***Error: Unable to execute gnuplot" >&2
+  abort=yes
+fi
+
+if [[ $# -gt 1 ]] || [[ "$abort" = "yes" ]] ; then
+  echo "$usage1" >&2 
+  echo "$usage2" >&2 
+  exit 1
+fi
+
+device=$(echo "$device" | perl -pe 'tr/A-Z/a-z/')
+
+test_arch=$(test_arch 2>/dev/null || echo "$ARCH")
+if [[ "$test_arch" = linux && -d /dev/shm ]] ; then
+  export TMPDIR=${TMPDIR:=/dev/shm}
+else
+  export TMPDIR=${TMPDIR:=/tmp}
+fi
+tmpfile=$TMPDIR/odb_xyplot.$$
+
+nx=$(expr $cx + 1)
+cat > $tmpfile << EOF
+(n == 1) { print \$$nx; n++; }
+/^: Pool#/ { n++; }
+EOF
+xlabel=$(awk -f $tmpfile < $input)
+
+ny=$(expr $cy + 1)
+cat > $tmpfile << EOF
+(n == 1) { print \$$ny; n++; }
+/^: Pool#/ { n++; }
+EOF
+ylabel=$(awk -f $tmpfile < $input)
+
+if [[ "$ct" -gt 0 ]] ; then
+  nt=$(expr $ct + 1)
+  cat > $tmpfile << EOF
+  (n == 1) { print \$$nt; n++; }
+  /^: Pool#/ { n++; }
+EOF
+  tlabel=$(awk -f $tmpfile < $input)
+  [[ "$tlabel" = "time" ]] || ct=0
+else
+  ct=0
+  tlabel=0
+fi
+
+[[ "$tlabel" != "time" ]] || xlabel="$xlabel & $tlabel"
+
+echo "# Input file for GNUplot on $(date)" > $tmpfile
+if [[ "$device" != "x11" ]] ; then
+   if [[ "$output" = "" ]] ; then
+     if [[ "$device" = "eps" ]] ; then
+       output=$(basename ${input}.eps)
+     elif [[ "$device" =  "ps" ]] ; then
+       output=$(basename ${input}.ps)
+     fi
+   fi
+   [[ "$output" = "" ]] || echo "set output '$output'" >> $tmpfile
+   if [[ "$device" = "eps" ]] ; then
+     echo "set terminal postscript eps 'Courier' 18" >> $tmpfile
+   elif [[ "$device" =  "ps" ]] ; then
+#     echo "set terminal postscript default" >> $tmpfile
+     echo "set terminal postscript" >> $tmpfile
+   fi
+else
+  echo "set terminal x11" >> $tmpfile
+fi
+
+binput=$(basename $input)
+
+echo "set nokey" >> $tmpfile
+echo "set time ,2" >> $tmpfile
+echo "set xlabel '$xlabel'" >> $tmpfile
+echo "set ylabel '$ylabel'" >> $tmpfile
+echo "set title 'File=$binput  :  $ylabel  =  F ( $xlabel )'" >> $tmpfile
+
+[[ "$options" = "" ]] || echo "$options" >> $tmpfile
+
+if [[ "$ct" -eq 0 ]] ; then
+  echo 'plot "'"< egrep -v ^: $input | egrep -v NULL | awk '{print "'$'$cx',$'$cy"}'"' | sort -n" with linespoints' >> $tmpfile
+else
+  echo 'plot "'"< egrep -v ^: $input | egrep -v NULL | awk '{print "'$'$cx',$'$ct',$'$cy"}'"' | dtfilt.x | sort -n" with linespoints' >> $tmpfile
+fi
+
+if [[ "$device" = "x11" ]] ; then
+  echo 'pause -1' >> $tmpfile
+elif [[ "$device" = "eps" ]] || [[ "$device" =  "ps" ]] ; then
+  gv=$(whence ghostview 2>/dev/null || echo "")
+  gvopt="-land"
+  if [[ "$gv" = "" ]] ; then
+    gv=$(whence gv 2>/dev/null || echo "")
+    gvopt=""
+  fi
+  if [[ "$gv" != "" && -x "$gv" ]] ; then
+    echo '!'"$gv $gvopt $output" >> $tmpfile
+  else
+    echo '!'"echo 'Neither ghostview nor gv found. Check your installation'" >> $tmpfile
+  fi
+fi
+
+[[ $verbose -ne 1 ]] || cat $tmpfile >&2
+
+rc=0
+if [[ "$device" = "x11" ]] ; then
+#  xterm +ls -geometry 30x0 -title "Quit Me" -e $gnuplot $tmpfile || rc=1
+# Thanx to Shinya Kobayashi/17-May-2006
+  $gnuplot -persist $tmpfile || rc=1
+elif [[ "$device" = "eps" ]] || [[ "$device" =  "ps" ]] ; then
+  rm -f $output
+  $gnuplot $tmpfile >/dev/null 2>&1 || {
+    echo "***Error in gnuplot (device=$device); The file is as follows:" >&2
+    cat $tmpfile >&2
+    echo "A hint: Check that your data does not contain missin data (NULL) or string data" >&2
+    rc=1
+  }
+else
+  echo "***Error: Unsupported device '$device'" >&2
+  rc=1
+fi
+
+rm -f $tmpfile
+exit $rc

@@ -1,0 +1,14 @@
+create_ioassign => odb_create_ioassign NOTE: used, differs from IFS scripts, which one is up to date?
+create_odbglue => odb_create_glue NOTE: used, differs from IFS scripts, which one is up to date?
+create_static_stubb      NOTE: used, differs from IFS scripts version
+mpif.h
+mpif.h.necsx.BoM
+mpif.h.necsx5.CSCS
+shp2txt.pl
+test_arch          NOTE: used by many tools: odbsql, odbf90, odbviewer, etc.
+where_fiddle.pl    NOTE: used by odbdiff tool
+
+client/server functionality
+---------------------------
+odb/tools/odbversion.c is only used to set environment variables: ODB_VERSION_ID, ODB_MAJORVN, ODB_MINORVN
+and those are only used in the script askodb

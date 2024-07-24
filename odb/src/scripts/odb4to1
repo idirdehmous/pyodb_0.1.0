@@ -1,0 +1,127 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15
+
+#begin
+#
+# odb4to1 : converts database's I/O-method#4 to #1
+#           using hcat-utility
+#
+# Usage : odb4to1
+#
+#end
+
+set -eu
+
+mysort=$ODB_FEBINPATH/mysort
+
+dbname=$(basename "$(\ls -C1 *.dd 2>/dev/null | head -1)" .dd)
+if [[ "$dbname" = "" ]] ; then
+  echo "***Error: Unable to determine database name"
+  exit 1
+fi
+
+if [[ ! -f $dbname.iomap ]] ; then
+  echo "***Error: Database '$dbname' has no I/O-map file"
+  exit 2
+fi
+
+ddfile=$dbname.dd
+
+iom=$(head -1 $ddfile | awk 'BEGIN {n=1;} {if (NF >= 3) n=$3;} END {print n;}')
+if [[ $iom -ne 4 ]] ; then
+  echo "***Error: Database '$dbname' I/O-method is not #4"
+  exit 3
+fi
+
+npools=$(head -5 $ddfile | tail -1)
+
+tables=$(egrep ^@ $ddfile | perl -ne 'print "$1\n" if (m/^\@(\S+)\s+\d+/)' | perl -pe 's/\n/ /g;')
+
+\rm -rf _
+mkdir _
+
+export TMPDIR=${TMPDIR:=/tmp}
+
+cmdfile=$TMPDIR/cmdfile.$$
+cat /dev/null > $cmdfile
+
+export ODB_PARAL=${ODB_PARAL:=3}
+paral=$ODB_PARAL
+
+if [[ $paral -eq  1 ]] ; then
+  echo '#!/bin/ksh' >> $cmdfile
+  echo 'set -eu'    >> $cmdfile
+  chmod u+rx $cmdfile
+fi
+
+in_error=$TMPDIR/in_error.$$
+\rm -f $in_error
+
+# reorder tables for optimal parallel dcagen: largest tables first
+# for this we need the actual cumulative filesizes for each table
+
+sizes=$TMPDIR/sizes.pl.$$
+cat > $sizes <<'EOF'
+use strict; my %cnt = (); my $size; my $key;
+for (<>) { next if (m/^\s*$/); s/^\s+//; s|\s+\d+/| |; 
+($size,$key) = split/\s+/; $cnt{$key} += $size; }
+foreach $key (keys(%cnt)) { $size = $cnt{$key}; print "$size $key\n"; }
+EOF
+
+#-- AIX doesn't seem to support 'xargs -r', but its 'xargs' by default implies -r ...
+xargs_r=$(echo "" | xargs -r 2>/dev/null && echo "xargs -r" || echo "xargs")
+
+tables=$(\
+    (echo "$tables" | perl -pe 's/\s*(\w+)/0 $1\n/g;' ; \
+    find [0-9]* -type f -follow | $xargs_r ls -C1s) | \
+    perl -w $sizes | $mysort -nr +0 | awk '{print $NF}' | perl -pe 's/\n/ /g;')
+
+\rm -f $sizes
+
+for t in $tables
+do
+  echo "$ODB_FEBINPATH/hcat -41 -l $dbname -t $t -n $npools || touch $in_error" >> $cmdfile
+done
+
+export ODB_DATAPATH_$dbname=.
+export ODB_SRCPATH_$dbname=.
+export IOASSIGN=$dbname.IOASSIGN
+
+if [[ $paral -eq 1 ]] ; then
+  $cmdfile
+else
+  nmaxcmd=$(wc -l $cmdfile)
+  env ODB_PARAL=$paral $ODB_FEBINPATH/fscheduler.x $nmaxcmd
+fi
+\rm -f $cmdfile
+
+if [[ -f $in_error ]] ; then
+  echo "***Error: There were error(s) in 4-to-1 creation"
+  \rm -f $in_error
+  exit 4
+fi
+
+#-- Alter .dd-file
+awk '{ if (NR == 1) { print $1,$2,1; } else { print; }}' < $ddfile > $ddfile.tmp
+\mv $ddfile.tmp $ddfile
+
+#-- Remove the I/O-map file
+\rm -f $dbname.iomap
+
+#-- Remove existing data dirs
+\rm -rf [0-9]*
+
+#-- Bring the re-generated data dirs one level up
+\mv _/[0-9]* .
+\rm -rf _
+
+#-- Re-generate DCAs
+\rm -rf dca
+dcagen -z -F -n -q 2>/dev/null || :
+dcafix -q
+
+#-- Clean-up
+odbclean -f
+
+
+

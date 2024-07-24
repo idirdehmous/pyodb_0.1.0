@@ -1,0 +1,326 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..." >&2; wait; exit 1' 1 2 3 15 
+#
+# A script to compile DDL-file(s)
+#
+# Usage: odbcomp [flags]                 LAYOUT.ddl    # SQL of data layout itself
+#        odbcomp [flags] -c              LAYOUT.ddl    # No shareable object creation
+#        odbcomp [flags] -w    -l LAYOUT viewfile.sql  # SQL of view(s)
+#        odbcomp [flags] -w -c -l LAYOUT viewfile.sql  # No shareable object creation
+#        odbcomp [flags] -z -c           LAYOUT.ddl    # Compile and provide dummy objects for empty tables
+#
+# Author: Sami Saarinen, ECMWF, 1998-2006
+#
+
+usage="head -10 $0 | tail -9"
+TMPDIR=${TMPDIR:=/tmp}
+
+if [[ $# -lt 1 ]] ; then
+  eval $usage >&2
+  exit 1
+fi
+
+#-- gprof style profiling on ? Set this externally to "-pg" to enable gprof
+export ODB_GPROF=${ODB_GPROF:=""}
+
+export ODB_CREATE_IOASSIGN=${ODB_CREATE_IOASSIGN:=1}
+
+export ODB_PARAL=${ODB_PARAL:=4}
+paral=${ODB_PARAL}
+
+cc_compile_error=$TMPDIR/cc_compile_error.$$
+
+function cc_compile {
+  [[ $# -lt 1 ]] && return
+  typeset f
+  for f in $*
+  do
+    if [[ -s $f ]] ; then
+      cmd="$ODB_CC $ODB_GPROF -c $f"
+      echo $cmd >&2
+           $cmd >&2 || (echo "***Error in compiling $f" >> $cc_compile_error)
+    fi
+  done
+}
+
+set +u
+
+if [[ "$ODB_SYSPATH" = "" ]] ; then
+  echo "***Error: ODB_SYSPATH is not defined; Please enter 'use odb'" >&2
+  exit 1
+fi
+
+views=$(echo "$*" | perl -pe 's/^.*\s*-w\b.*/1/')
+#echo "**views=$views" >&2
+
+[[ "$views" = "1" ]] || views=0
+dbname=$(echo "$*" | perl -ne 'print $1 if (/.*-l\s*(\w+).*/);')
+
+args=$*
+argsnew=""
+
+# for now ...
+nsql=0
+sqlfiles=""
+thefile=""
+for x in $args
+do
+  if [[ -f "$x" ]] ; then
+    suffix=$(echo "$x"| perl -pe 's/\w+\.(\w+)/$1/')
+    if [[ "$suffix" = sql ]] ; then
+      ((nsql+=1))
+      sqlfiles="$sqlfiles $x"
+      thefile=$x
+      if [[ $views -ne 1 ]] ; then
+        views=1
+        argsnew="$argsnew -w"
+      fi
+    else
+      argsnew="$argsnew $x"
+    fi
+  else
+    argsnew="$argsnew $x"
+  fi
+done
+
+if [[ $nsql -le 1 ]] ; then
+  file=$(echo "$0 $*"| perl -pe 's/.*\s+(\S+)\s*$/$1/')
+  args="$argsnew $thefile"
+else
+  file=tmp$$.sql
+  args="$argsnew $file"
+  cat /dev/null > $file
+  for x in $sqlfiles 
+  do
+    (cat $x ; echo ';') >> $file
+  done
+  echo "***Supplied SQL-files ($sqlfiles) placed temporarely in $file"
+  # cat $file
+fi
+pref=$(echo "$file"| perl -pe 's/(\w+)\.\w+/$1/')
+sufx=$(echo "$file"| perl -pe 's/\w+\.(\w+)/$1/')
+
+addargs=""
+
+setup_file="/dev/null"
+
+if [[ "$dbname" = "" ]] ; then
+  dbname=$(basename $(ls -C1 *.dd 2>/dev/null | head -1) .dd || echo "")
+  if [[ "$dbname" = ".dd" ]] ; then
+    dbname=""
+  fi
+fi
+
+if [[ "$IOASSIGN" = "" ]] ; then
+  export IOASSIGN=IOASSIGN
+fi
+
+if [[ "$dbname" = "" ]] ; then
+  if [[ -s "$IOASSIGN" ]] ; then
+    dbname=$(egrep -v '^_' $IOASSIGN | head -1 | perl -pe 's/^(\w+).*/$1/;')
+  fi
+fi
+
+if [[ "$dbname" = "" ]] ; then
+  dbname=$(basename $file | perl -pe 's/(\w+)\..*/uc($1)/e;')
+fi
+
+# A big thanks to ttl 24/04/2006 added for the idea of including -I$ODB_SRCPATH_<dbname> !!
+testvar=ODB_SRCPATH_${dbname}
+testvalue=$(eval echo \$$testvar 2>/dev/null || :)
+if [[ "$testvalue" != "" && -d "$testvalue" ]] ; then
+  export ODB_CC="${ODB_CC:=cc} -I$testvalue"
+  addargs="$addargs -I$testvalue"
+  libname=$testvalue/lib$dbname.a
+else
+  libname=lib$dbname.a
+fi
+
+if [[ ! -s "$IOASSIGN" ]] ; then
+  rm -f *IOASSIGN*
+  create_ioassign -l $dbname
+  export IOASSIGN=$dbname.IOASSIGN
+fi
+
+addargs="$addargs -l $dbname"
+
+#if [[ -f "$dbname.dd" ]] ; then
+#  nf=$(head -1 $dbname.dd | awk '{print NF}')
+#  if [[ $nf -gt 2 ]] ; then
+#    awk '{if (NR==1) print $1,$2; else print }' $dbname.dd > $dbname.dd.$$
+#    \cp $dbname.dd $dbname.dd.bck
+#    \mv $dbname.dd.$$ $dbname.dd
+#  fi
+#fi
+
+viewnames=""
+
+if [[ -f "$file" ]] ; then
+  viewnames=$(perl -ne 'print "\L$1 " if (/CREATE\s+VIEW\s+(\w+)/i);' < $file)
+  if [[ "$viewnames" != "" ]] ; then
+    addargs="$addargs -w"
+    views=1 
+  fi
+#  echo ">>viewnames=$viewnames" >&2
+#  echo ">>views=$views" >&2
+#  echo ">>addargs=$addargs" >&2
+  if [[ $views -eq 0 ]] ; then
+    setup_file=$dbname.setup
+  fi
+  export ODB_SETUP_FILE="$setup_file"
+fi
+
+if [[ "$ODB_LIBS_KEEP" = "" ]] ; then
+  unset ODB_LIBS
+else
+  if [[ $ODB_LIBS_KEEP -ne 1 ]] ; then
+    unset ODB_LIBS
+  fi
+fi
+
+[[ "$sufx" = @(ddl|sql) ]] || {
+  if [[ $views -eq 0 ]] ; then
+    ln -s $file $pref.ddl 2>/dev/null || :
+    args=$(echo $args | perl -pe "s/\.(\w+)\$/.ddl/")
+  fi
+}
+
+if [[ "$ODB_STATIC_LINKING" -eq 1 ]] ; then
+  addargs="$addargs -s -S -C"
+fi
+
+# Prefer back-end compilation over front-end ?
+export RUN_FE_DIRECT=${RUN_FE_DIRECT:=0}
+if [[ $RUN_FE_DIRECT -eq 1 && -x $ODB_BINPATH/odb98be.x ]] ; then
+  ODB_COMPILER=$(echo "${ODB_COMPILER}" | perl -pe 's/\bodb98\b/odb98be/')
+  echo "***Note: Using back-end ODB/SQL-compiler" >&2
+fi
+
+cmd="${ODB_COMPILER} -I $ODB_SYSPATH $addargs $args"
+
+if [[ -r ${dbname}.flags ]] ; then
+  export ODB_COMPILER_FLAGS=${dbname}.flags
+fi
+
+if [[ $views -eq 0 ]] ; then
+  rm -f ${dbname}.c ${dbname}.h ${dbname}_T_*.c
+fi
+
+echo "$cmd" >&2
+      $cmd  >$file.list 2>&1 || {
+   set -x
+   cat $file.list >&2
+   exit 1
+ }
+egrep -v 'was already set ; previous value retained' $file.list
+rm -f $file.list
+
+if [[ -f "$setup_file" ]] && [[ "$setup_file" != "/dev/null" ]] ; then
+  chmod u+rx "$setup_file"
+fi
+
+if [[ ! -f "$IOASSIGN" ]] && [[ "$setup_file" != "/dev/null" ]] ; then
+  if [[ -f "$setup_file" ]] ; then
+    echo "*** Running IOASSIGN-setup file '$setup_file' ..." >&2
+    $setup_file >/dev/null 2>&1
+  fi
+fi
+
+if [[ "$ODB_STATIC_LINKING" -eq 1 ]] ; then
+  if [[ $views -eq 0 ]] ; then
+    create_odbglue $dbname
+    create_ioassign -l $dbname
+    create_static_stubb $dbname /dev/null
+    rm -f $libname # a fresh library will be created
+    filelist=$(\ls ${dbname}.c ${dbname}_T_*.c ${dbname}_Sstatic.c 2>/dev/null || :)
+  else
+    create_static_stubb $dbname $file
+    if [[ -s ${dbname}_Sstatic.c ]] ; then
+      filelist=${dbname}_Sstatic.c
+    else
+      filelist=""
+    fi
+    # viewnames=$(egrep ODB_ANCHOR_VIEW ${dbname}_Sstatic.c | perl -pe 's/.*,\s*(\w+)\b.*/$1/')
+    viewnames=$($ODB_BINPATH/create_static_stubb -v $dbname $file)
+    for f in $viewnames
+    do
+      if [[ -s ${dbname}_$f.c ]] ; then
+        filelist="$filelist ${dbname}_$f.c"
+      fi
+    done
+  fi
+
+  # Order filelist by size of the file, largest file first
+  mysort=$ODB_FEBINPATH/mysort
+  filelist=$(\ls -lg $filelist 2>/dev/null | $mysort -nr +3 | awk '{print $NF}')
+
+  rm -f $cc_compile_error
+#  subproc="&"
+#  [[ $paral -gt 1 ]] || subproc=""
+#  n=0
+#  for f in $filelist
+#  do
+#    eval "(cc_compile $f) $subproc"
+#    ((n+=1))
+#    [[ $((n%$paral)) -eq 0 ]] && wait
+#  done
+
+#  wait
+
+  cmdfile=$TMPDIR/cmdfile.$$
+  cat /dev/null > $cmdfile
+  cat /dev/null > $cc_compile_error
+  for f in $filelist
+  do
+    echo "$ODB_CC $ODB_GPROF -c $f || (echo '***Error in compiling '$f >> $cc_compile_error)" >> $cmdfile
+  done
+  objlist=$(echo $filelist | sed 's/\.c/.o/g')
+  rm -f $objlist
+
+  if [[ $paral -gt 1 ]] ; then
+    #-- The following command compiles C-files in a parallel loop
+    nmaxcmd=$(wc -l $cmdfile)
+    env ODB_PARAL=$paral $ODB_FEBINPATH/fscheduler.x $nmaxcmd >&2
+  else
+    (set -ex; $ODB_CC $ODB_GPROF -c $filelist || (echo '***Error(s) in compilation' >> $cc_compile_error))
+  fi
+  rm -f $cmdfile
+
+  if [[ -s $cc_compile_error ]] ; then
+    echo "***Error: C-compilation has failed" >&2
+    cat $cc_compile_error >&2
+    rm -f $cc_compile_error
+    exit 1
+  fi
+  rm -f $cc_compile_error
+
+  if [[ ! -f $libname ]] ; then
+    $ODB_AR q $libname $objlist || exit 3
+  else
+    $ODB_AR r $libname $objlist || exit 3
+  fi
+  if [[ -f $ODB_SYSPATH/SHLIB && "$ODB_LD_SHARED" != none ]] ; then
+  # Create shared lib
+    libso=lib$dbname$ODB_LD_SHARED_SFX
+    rm -f $libso
+    $ODB_LD_SHARED -o $libso `$ODB_AR t $libname` || {
+      mkdir _tmpdir.$$
+      cd _tmpdir.$$
+      $ODB_AR x ../$libname
+      $ODB_LD_SHARED -o ../$libso `$ODB_AR t ../$libname` || {
+        echo "***Error: Unable to create shareable library '$libso'" >&2
+        echo "          Retry with 'export ODB_LD_SHARED=none' in Korn-shell or" >&2
+        echo "                     'setenv ODB_LD_SHARED none' in C-shell" >&2
+        cd .. ; rm -rf _tmpdir.$$
+        exit 2
+      }
+      cd .. ; rm -rf _tmpdir.$$
+    }
+  fi
+fi
+
+if [[ $nsql -ge 2 ]] ; then
+  rm -f $file
+fi
+
+exit 0

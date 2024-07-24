@@ -1,0 +1,224 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 1' 1 2 3 15
+#begin
+#
+# odbtar [-]flags tarfile(s) [directories|source_files]
+#
+# flags : 
+#
+#  c -- create tar-file : just one tarfile accepted + at least one directory/source_file
+#  f -- next argument is a tarfile : not required; always implied
+#  h -- follow the symbolic link
+#  t -- table of contents on tar-file(s) : as in x option
+#  v -- verbose output
+#  x -- expand tar-file(s) : all file options must be tarfiles; no directories/source_files
+#  z -- gzip/gunzip the tarfile(s) : assumed by default if (1st) tarfile's suffix is .tar.gz or .tgz
+#  # -- A number 1 to 9 to indicate gzip packing method, where '#' is
+#       1=fastest, less compression (default) ... 9=slowest, best compression
+#       Applicable only with {c,z} options
+#  D -- Do not attempt to run 'dcagen' after the expand (the default, if input file comes from stdin ("-"))
+#  F -- Enforce the re-run 'dcagen'
+#
+# Note that {c,t,x}-flags are mutually exclusive.
+#
+# If the tarfile is "-", then assume tarfile read/written from/to stdin/stdout.
+# And {t,x}-flags are used with tarfile "-", then no more arguments accepted after the "-".
+#
+# The minimum number of arguments required is 2 for {x,t}-flags and 3 for c-flag.
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, 31-May-2007
+#
+
+set -eu
+
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+abort=no
+
+function do_abort {
+  typeset kmd=$1
+  typeset rest=$2
+  awk '/#begin/,/#end/' $kmd | egrep -v '#(begin|end)' | sed 's/^#//' >&2
+  echo "*** Error in command : $(basename $kmd) $rest" >&2
+  exit 1
+}
+
+nargs=$#
+args=${*:-}
+
+if [[ $nargs -lt 2 ]] ; then
+  do_abort $cmd "$args"
+else
+  flags=$1
+  shift
+  if [[ "$(echo "X$flags" | cut -c1-2)" != "X-" ]] ; then
+    #-- add '-' in front of $flags and redo
+    newcmd="$0 -$flags $*"
+    exec $newcmd || do_abort $cmd "$args"
+  fi
+fi
+
+second_arg=$1
+shift
+other_args=${*:-}
+
+if [[ "$second_arg" = "-" ]] ; then
+  stdinout=1
+  dcagen=0
+else
+  stdinout=0
+  dcagen=1
+fi
+
+create=0
+file=1
+follow=0
+toc=0
+verbose=0
+expand=0
+zip=0
+pmethod=1
+
+FLAGS=cDfFhtvxz123456789
+
+while getopts $FLAGS option $flags
+do
+  case $option in
+  c) create=1;;
+  D) dcagen=0;;
+  f) file=1;;
+  F) dcagen=2;;
+  h) follow=1;;
+  t) toc=1;;
+  v) verbose=1;;
+  x) expand=1;;
+  z) zip=1;;
+  [1-9]) pmethod="$option";;
+  *) echo "***Error: Unrecognized option : $option" >&2; abort=yes; break;;
+  esac
+done
+
+#-- Some consistency checks ...
+if [[ $create -eq 1 ]] ; then
+  [[ $toc    -eq 0 ]] || abort=yes
+  [[ $expand -eq 0 ]] || abort=yes
+  [[ $nargs  -ge 3 ]] || abort=yes
+  dcagen=0 # since not applicable
+elif [[ $toc -eq 1 ]] ; then
+  [[ $create -eq 0 ]] || abort=yes
+  [[ $expand -eq 0 ]] || abort=yes
+  follow=0 # since not applicable
+  dcagen=0 # since not applicable
+elif [[ $expand -eq 1 ]] ; then
+  [[ $create -eq 0 ]] || abort=yes
+  [[ $toc    -eq 0 ]] || abort=yes
+  follow=0 # since not applicable
+else
+  abort=yes
+fi
+
+if [[ $stdinout -eq 1 ]] ; then
+  dcagen=0
+fi
+
+if [[ $stdinout -eq 1 && $nargs -ge 3 ]] ; then
+  #-- Cannot have 'tar -t - other_args' nor 'tar -x - other_args'
+  if [[ $toc -eq 1 ]] || [[ $expand -eq 1 ]] ; then
+    abort=yes
+  fi
+fi
+
+if [[ $abort = yes ]] ; then
+  do_abort $cmd "$args"
+fi
+
+if [[ $zip -eq 0 && $stdinout -eq 0 ]] ; then
+  bn=$(basename "$second_arg" | sed 's/\..*//')
+  targz=$(basename "$second_arg" .tar.gz)
+  tgz=$(basename "$second_arg" .tgz)
+  if [[ "$targz" = "$bn" ]] || [[ "$tgz" = "$bn" ]] ; then
+    zip=1
+  fi
+fi
+
+if [[ $create -eq 1 && $zip -eq 1 && $stdinout -eq 0 ]] ; then
+  #-- Make sure the second_arg (tarfile) will have .tar.gz suffix, unless
+  #   already .tar.gz or .tgz
+  bn=$(basename "$second_arg" | sed 's/\..*//')
+  targz=$(basename "$second_arg" .tar.gz)
+  tgz=$(basename "$second_arg" .tgz)
+  if [[ "$targz" = "$bn" ]] || [[ "$tgz" = "$bn" ]] ; then
+    :
+  else
+    second_arg="${second_arg}.tar.gz"
+  fi
+fi
+
+tarflags="-"
+
+[[ $create  -eq 0 ]] || tarflags="${tarflags}c"
+[[ $follow  -eq 0 ]] || tarflags="${tarflags}h"
+[[ $toc     -eq 0 ]] || tarflags="${tarflags}t"
+[[ $verbose -eq 0 ]] || tarflags="${tarflags}v"
+[[ $expand  -eq 0 ]] || tarflags="${tarflags}x"
+
+[[ $file    -eq 0 ]] || tarflags="${tarflags}f"
+
+if [[ $create -eq 1 ]] ; then
+  #-- Create tarfile
+  if [[ $zip -eq 0 ]] ; then
+    if [[ $stdinout -eq 0 ]] ; then
+      tar $tarflags $second_arg $other_args
+    else # Note: Writes to stdout
+      tar $tarflags - $other_args
+    fi
+  else # Note: Using gzip
+    if [[ $stdinout -eq 0 ]] ; then
+      tar $tarflags - $other_args | gzip -c$pmethod > $second_arg
+    else # Note: Writes to stdout
+      tar $tarflags - $other_args | gzip -c$pmethod
+    fi
+  fi
+elif  [[ $toc -eq 1 ]] || [[ $expand -eq 1 ]] ; then
+  #-- Table of contents on tarfile(s) or expand tarfile(s)
+  if [[ $zip -eq 0 ]] ; then
+    if [[ $stdinout -eq 0 ]] ; then
+      cat $second_arg $other_args | tar $tarflags -
+    else # Note: Reads from stdin
+      tar $tarflags -    
+    fi
+  else # Note: Using gunzip
+    if [[ $stdinout -eq 0 ]] ; then
+      cat $second_arg $other_args | gunzip -c | tar $tarflags -
+    else # Note: Reads from stdin
+      gunzip -c | tar $tarflags -
+    fi
+  fi
+
+  if [[ $dcagen -ge 1 ]] ; then
+    #-- Create dca-indices if not up-to-date, fix some compatibility issues ...
+    if [[ $zip -eq 0 ]] ; then
+      dbpath=$(cat $second_arg | tar -tf - | head -1)
+    else
+      dbpath=$(cat $second_arg | gunzip -c | tar -tf - | head -1)
+    fi
+    if [[ -d "$dbpath" ]] ; then
+      if [[ ! -f $dbpath/.odbprune_done ]] ; then
+        odbprune -i $dbpath >/dev/null 2>&1 || :
+      fi
+      if [[ $dcagen -eq 1 ]] ; then
+        if [[ ! -f $dbpath/dca/.dcafixed ]] ; then
+          dcafix -q -i $dbpath >/dev/null 2>&1 || :
+        fi
+      elif [[ $dcagen -eq 2 ]] ; then
+        \rm -f $dbpath/dca/.dcafixed
+        dcagen -z -F -n -i $dbpath >/dev/null 2>&1 && cat /dev/null > $dbpath/dca/.dcafixed || :
+      fi
+    fi
+  fi
+fi
+
+exit 0
+

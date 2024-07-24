@@ -1,0 +1,47 @@
+#!/bin/ksh
+#
+# latlon_rad [-s]
+#
+# Quickly establishes whether (lat,lon) are in radians or degrees
+#
+# Returns 1, if in radians, 0 if not and -1 if could not be determined
+#
+# Use -s (s for slow) to scan all pool files.
+# By default uses quick mode and checks the very first pool only
+#
+# (lat,lon) are assumed to be lat@hdr and lon@hdr
+# Override via ODB_LAT and ODBLON, respectively
+#
+
+set -eu
+
+mode="-mxQ"
+if [[ $# -ge 1 ]] ; then
+  if [[ $1 -eq '-s' ]] ; then
+    mode="-mx"
+  else
+    echo "Usage: latlon_rad [-s]" >&2
+    exit 1
+  fi
+fi
+
+export ODB_LAT=${ODB_LAT:="lat@hdr"}
+export ODB_LON=${ODB_LON:="lon@hdr"}
+
+tables=$(echo "${ODB_LAT} ${ODB_LON}" |\
+         perl -pe 's/\w+\@(\w+)\b/$1/g; s/[,:\s]+/\n/g' | sort -u)
+
+# pi
+pi=$(echo "4*a(1)" | bc -l)
+eps=0.01  # Added to pi to just accept abs(values) < pi + eps
+#eps=$pi  # treat abs(lat,lon-values) < 2*pi as radians
+
+(echo "$pi $eps"; 
+ dcagen $mode -t "$tables" -c "${ODB_LAT}" -c "${ODB_LON}" 2>/dev/null) |\
+awk 'BEGIN { res=0; nrec=0; } { \
+     if (NR==1) { pi=$1; eps=$2; gaagaa=pi+eps; } else { nrec++;\
+        if ($2 > -gaagaa && $3 < gaagaa) { res++; } } } \
+     END { if (nrec==0) { res=-1; } else { res/=nrec; } \
+           printf("%d\n",res); }'
+
+

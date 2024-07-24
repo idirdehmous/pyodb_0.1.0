@@ -1,0 +1,15 @@
+# Import file for ODB package
+#
+# ODB_ENVIRONMENT - list of run-time environment variables
+# ODB_SCHEMAS     - list of pre-compiled schemas
+
+set(ODB_ENVIRONMENT "@ODB_INSTALL_ENVIRONMENT@")
+set(ODB_SCHEMAS "@ODB_SCHEMAS@")
+
+foreach(schema ${ODB_SCHEMAS})
+    set(ODB_HAVE_${schema} 1)
+endforeach()
+
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_LIST_DIR})
+
+list(APPEND ODB_INCLUDE_DIRS "${ODB_CMAKE_DIR}/../../../module")

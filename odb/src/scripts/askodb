@@ -1,0 +1,938 @@
+#!/bin/ksh
+trap 'echo "Received signal, aborting ..."; wait; exit 123' 1 2 3 15
+# Save current fd#1 (stdout) to #3
+exec 3>&1
+# Save current fd#2 (stderr) to #4
+exec 4>&2
+# Redirect globally stdout (#1) to stderr (#2)
+exec 1>&2
+#begin
+#
+# askodb -- A utility to launch ODB data queries away from database directory, 
+#           so that multiple users can share the same database. Database
+#           can reside on a remote machine, but then server-process will be created (if not already running)
+#
+# Options:				Description and defaults
+# --------				------------------------
+#
+#	-F				Do *not* use the new & fast 'odbsql' (the default is to use 'odbsql')
+#	-C				Use this when askodb is invoked from c/s software, not directly
+#	-b format			The actual data is returned in binary mode (the default is text-mode)
+#                                       The default format is "inary" or "binary" or "normal", obtained via:
+#                                       -binary or -b binary or -b normal
+#                                       Format NetCDF f.ex. can be returned via -b netcdf
+#       -O output_file_name             Output file name (default: /dev/null)
+#	-B bufsize			Buffer size for retrieval, in double's (default=max(ncols,1000))
+#	-c				Automatic (re-)compilation & cleaning, if necessary
+#	-D				Return data only (i.e. as from ODBI_fetch_row_array())
+#	-f sqlfile[.sql|.so] 		SQL-query file; by default=myview (use .so-sfx to avoid recompilation)
+#	-h				Help! Displays this output
+# 	-H {host[:port]|[host]:port}	Reserved for client/server. Denotes server hostname & port
+#	-i database_dir		        Database directory. No defaults
+# 	-i [host:]database_dir		Database directory on the target (host) machine
+#	-k				Keep all temporary stuff in workdir (default: do NOT keep)
+#	-l [start_row,]maxrows		Limit option. Returns only maxrows, starting from output row start_row
+#	-m				Return database level (tables, set-vars, etc.) metadata only, no data
+#	-N                              In text-mode do not print NULL's, but the value of missing data
+#	-o working_directory		Working directory. Determined from database_dir
+#	-p poolmask			Which pools to scan (by default all pools included)
+#	-P port				Port number for client/server
+#	-r                              Re-execute the program without any recompilations
+#	-q 'sql_query_string'		Data query string (default: <empty> and -f sqlfile takes precedence)
+#	-t [@]table_name                Data query string will be 'SELECT * FROM table_name'. You can omit the '@'.
+#	-s 			        Run in silent mode i.e. suppress all irrelevant output
+#	-S			        Show row numbers in text-mode output
+#	-T timeout			Timeout value for C/S communications to avoid hanging (default:3600 sec)
+#	-U use_application		Runs 'use applic'; can be supplied many times; say -U pgf90 for 'use pgf90'
+# 	-u username			Changes the default username
+#	-v 				Be just a little more verbose while running the askodb-script
+#	-V '$var1=1.5; var2=2.3'	Overrides $-variable defaults; The '$' can be omitted.
+#	-x specific_executable_name	Use specific executable (found & already created under $workdir)
+#	-5				Abandon fast ODB data access (i.e. do NOT use I/O-method 5 => high memory usage)
+#	-n numeric_odb_version		Clients 'odb_version -numeric'
+#	-# ncpus[.nchunk]		Parallelism (and pool-chunking) for server process (default: ncpus=1)
+#	-g debugger			Run under debugger
+#	--				The query will be read from standard input
+#       [dbname]			ODB-database name (usually figured out from the '-i' option)
+#
+#end
+#
+# Author: Sami Saarinen, ECMWF, Sep/Oct-2004
+#
+# Modifications:
+#  Sami Saarinen, ECMWF, 25-Apr-2007 : dbname figured out from datapath for client/server -runs, too
+#  Sami Saarinen, ECMWF, 05-Dec-2007 : datapath can contain wildcards [given in quotes], since odbmerge is performed
+#  Sami Saarinen, ECMWF, 13-Dec-2007 : datapath can contain odb://hostname[:port]/path
+# 
+
+set +xv
+set -eu
+
+devnull=/dev/null
+
+thisdir=$(\cd .; echo $(pwd))
+cmd=$(\cd $(dirname $0); echo $(pwd))/$(basename $0)
+
+export DR_HOOK=0
+export DR_HOOK_SHOW_PROCESS_OPTIONS=${DR_HOOK_SHOW_PROCESS_OPTIONS:=0}
+export DR_HOOK_SILENT=${DR_HOOK_SILENT:=1}
+export EC_SORTING_INFO=0
+
+export ARCH=${ARCH:=unknown}
+
+test_arch=$(test_arch 2>$devnull || echo "$ARCH")
+
+export USER=${USER:=$(id -un)}
+
+export TMPDIR=${TMPDIR:=/tmp}
+
+FLAGS="#:b:B:cCDf:Fg:hH:i:kl:mn:No:O:p:P:rq:sSt:T:u:U:vV:x:5-"
+
+prog=odbi_direct_main
+
+objs="$prog.o"
+
+fast=1                  # fast=0 when -F is given
+fastopt=""
+fastquery=""
+numeric_odb_version=0   # Override with -n `odbversion -numeric`
+binary=0
+format=normal
+binmode=""		# -binary
+bufsize="-B 1000"	# -B bufsize
+compile=0		# -c
+clean_too=0		# (cleaning takes place only if -c is supplied explicitly)
+data_only=""		# -D
+data_only_given=0	# (a flag to see whether -D was given; to disable possible -m)
+viewname=myview		# -f viewname[.so]
+relink=0		# (need for re-linking decided on-the-fly)
+abort=no		# -h (help option => activated by setting abort=yes)
+hostport=""		# -H host[:port] or -H [host]:port or -P port)
+cliserv=0		# (flag whether -H option was used or -i host:/data/path was given)
+datapath="."		# -i datapath (the default current dir)
+dbname=""		# (figured out from .dd-file in datapath or from the last parameter)
+keep=0			# -k
+limit=""		# -l 100 alias -l 1,100 (or -l 200,10)
+metadata=""		# -m
+request_metadata=0	# (set to 1, if -m given)
+nulls=""		# -N
+workdir=""		# -o workdir
+poolmask=""		# -p 1-10 -p 12,13 -p "15-17,20"
+#defport=11998		# -P default_port
+defport=$(id -u | awk '{print $1%10000 + 10000}') # -P default_port=mod(uid,10000)+10000
+query=""		# -q 'select x,y from t1,t2 where $x > 2'
+query_given=0		# (to record whether -q option was given)
+reexec=0		# -r
+silent=0		# -s
+showrows=""		# -S
+timeout=3600		# -T 100
+user=$USER		# -u username
+use_appl=""		# -U pgf90
+is_verbose=0		# -v
+varvalue=""		# -V '$var = value'
+varargs=""		# (filled at the end based on $varvalue(s))
+my_a_out=""		# -x executable_file
+my_a_out_given=0	# (stems from the previous)
+io_method=5		# -5  (to turn *off* the fast I/O-method 5)
+stdin=0			# --
+debugger=""		# -g debugger
+ncpus=1                 # -# ncpus[.nchunk]
+outfil=$devnull         # -O output_file
+csopt=""                # -C
+
+while getopts ${FLAGS} i
+do
+  case $i in
+	b)	format="$OPTARG"; binmode="-b $format"; binary=1 ;;
+	B)	bufsize="-B $OPTARG";;
+	c)	compile=1; clean_too=1;;
+	C)	csopt="-C";;
+	D)	data_only="-D"; data_only_given=1;;
+	f)	viewname="$OPTARG";;
+	F)	fast=0; fastopt="-F";;
+	g)	debugger="$OPTARG";;
+	h)	abort=yes;;
+	H)	hostport="$OPTARG"; cliserv=1;;
+	i)	datapath="$OPTARG";;
+	k)	keep=1;;
+	l)	limit="$OPTARG";;
+	m)	metadata="-m"; request_metadata=1;;
+	n)	numeric_odb_version="$OPTARG";;
+	N)	nulls="-N";;
+	o)	workdir="$OPTARG";;
+	O)	outfil="$OPTARG";;
+	p)	poolmask="$poolmask $OPTARG";;
+	P)	defport="$OPTARG";;
+	q)	query="$OPTARG"; query_given=1;;
+	r)	reexec=1;;
+	s)	silent=1;;
+	S)	showrows="-S";;
+	T)	timeout="$OPTARG";;
+	t)	typeset tbl=$(echo "$OPTARG" | perl -pe 's/^\s*(\@)?//'); query="SELECT * FROM $tbl"; query_given=1;;
+	u)	user="$OPTARG";;
+	U)	use_appl="$use_appl $OPTARG";;
+	v)	is_verbose=1;;
+	V)	varvalue="$OPTARG ; $varvalue";;
+	x)	my_a_out="$OPTARG";;
+	5)	io_method=-1;; # Setting this to a <=0 value will ensure I/O-method 5 will NOT be used
+                               # If > 0, there is an automatic test for READ/ONLY databases, whether ./dca
+                               # directory exists. But keeping I/O-method <= 0 bypasses this testing
+	-)	stdin=1;;
+	\#)	ncpus="$OPTARG";;
+	\?)	abort=yes; break;;
+  esac
+done
+
+#set -x
+
+shift $(expr $OPTIND - 1)
+
+if [[ $# -gt 0 ]] ; then
+  dbname=$1
+  shift
+fi
+
+if [[ $stdin -eq 1 ]] ; then
+  query="$(\cat);"
+  query_given=1
+fi
+
+if [[ $silent -eq 1 ]] ; then
+# You asked for silence, you've got it!
+# Closing stdout & stderr
+  exec 1>$devnull
+  exec 2>$devnull
+  zailenz="-s"
+else
+  zailenz=""
+fi
+
+if [[ $# -gt 0 ]] ; then
+  echo "***Error: Too many args. The not understood were : $*" >&4
+  abort=yes
+fi
+
+if [[ "$datapath" = "" ]] ; then
+  echo "***Error: Database path not given. Use -i option" >&4
+  abort=yes
+fi
+
+#-- Handle $-variables
+
+if [[ "$varvalue" != "" ]] ; then
+  varargs=$(echo "$varvalue" | \
+            perl -pe 's/\s+//g; s/\$//g; s/^/;/; s/;(\w+=\w+)/ -V $1\n/g; s/\n//g; s/;/ /g; s/\s+/ /g')
+fi
+
+#-- Check limit
+
+if [[ "$limit" != "" ]] ; then
+  limit=$(echo "$limit" | perl -pe 's/^(,|\d+\s*$)/1 $1/; s/,/ /g; s/^\s+//; s/\s+$//; s/\s+/,/')
+  limit="-L $limit"
+fi
+
+#-- Check the mutually exclusive requests
+
+if [[ $request_metadata -eq 1 && $data_only_given -eq 1 ]] ; then
+  request_metadata=0
+  metadata=""
+fi
+
+# Detect if client/server from datapath (unless -H already given)
+
+# Prune datapath & hostport if contains odb://host[:port]/path
+odbslsl=$(echo "$datapath" | cut -c1-6)
+if [[ "$odbslsl" = "odb://" ]] ; then
+  datapath=$(echo "$datapath" | perl -pe 's|^odb://||')
+  # overwrite $hostport, since it takes now precedence
+  hostport=$(echo "$datapath" | awk -F/ '{print $1}')
+  datapath=$(echo "$datapath" | perl -pe 's|^.*?/|/|')
+  cliserv=1
+fi
+
+# Create host & port
+host=""
+port=$defport
+
+nargs=$(echo "$datapath" | awk -F: '{print NF}')
+if [[ $cliserv -eq 0 ]] ; then
+  if [[ $nargs -eq 2 ]] ; then
+    cliserv=1
+    host=$(echo "$datapath" | awk -F: '{print $1}')
+    datapath=$(echo "$datapath" | sed 's/^.*://')
+  fi
+else
+  if [[ $nargs -eq 2 ]] ; then
+    host=$(echo "$datapath" | awk -F: '{print $1}')
+    datapath=$(echo "$datapath" | sed 's/^.*://')
+  fi
+  ahost=$(echo "$hostport" | awk -F: '{print $1}')
+  aport=$(echo "$hostport" | awk -F: '{print $2}')
+  if [[ "$ahost" != "" ]] ; then
+    host=$ahost # takes precedence
+  fi
+  if [[ "$aport" != "" ]] ; then
+    port=$aport
+  fi
+fi
+
+if [[ $cliserv -eq 1 && "$host" = "" ]] ; then
+  host="localhost"
+fi
+
+if [[ $cliserv -eq 1 ]] ; then
+  #-- check if the "$host" and `hostname` are in fact the same ;-)
+  host_ip_addr=$($ODB_FEBINPATH/odbi_host.x "$host" || echo "$host")
+  hostname=$(hostname) 
+  hostname_ip_addr=$($ODB_FEBINPATH/odbi_host.x "$hostname" || echo "$hostname")
+  if [[ $host_ip_addr = $hostname_ip_addr ]] ; then
+    cliserv=0 # switch off the client/server-approach and use local dadabaaz-approach (faster)
+  fi
+fi
+
+if [[ $abort = no && $cliserv -eq 1 ]] ; then 
+#
+# resolve host IP-address for convenience (obsolete; resolve done by the client):
+#  is_ipv4=$(echo "$host" | awk -F. '{print NF}')
+#  if [[ "$host" = localhost ]] || [[ "$host" = "$(hostname)" ]] ; then
+#    host="127.0.0.1"
+#  elif [[ "$is_ipv4" != "4" ]] ; then
+#    nonexist=$(nslookup -timeout=1 $host < $devnull 2>&1 | grep "Non-existent" | sed 's/^.*\(Non-existent\).*$/\1/')
+#    if [[ "$nonexist" = "" ]] ; then
+#      host=$(nslookup -timeout=1 $host < $devnull |\
+#             egrep "^Address:" | perl -pe 's/^\s*\n//; s/^[>].*$//' | tail -1 | awk '{print $2}')
+#    else
+#      echo "***Error: IP-address for host '$host' does not exist. Check your -H or -i option(s)" >&4
+#      abort=yes
+#    fi
+#  fi
+#
+  if [[ "$dbname" = "" && "$datapath" != "" ]] ; then
+    dbname=$(basename "$datapath" | perl -pe 's/\..*//; tr/a-z/A-Z/')
+  fi
+
+  if [[ "$dbname" = "" ]] ; then
+    echo "***Error: Database name must be given explicitly in client/server-runs" >&4
+    abort=yes
+  fi
+fi
+
+#-- Prune poolmask
+
+if [[ $abort = no ]] ; then
+  if [[ "$poolmask" != "" ]] ; then
+    poolmask=$(echo "$poolmask" | perl -pe 's/^\s+//; s/\s+$//; s/\s+/,/g')
+  else
+    poolmask=$(echo "$poolmask" | perl -pe 's/^\s*,//')
+  fi
+fi
+
+#----------------------------------------------------------------------------#
+# Branch off to the client/server-world and never return back to this script #
+#----------------------------------------------------------------------------#
+
+if [[ $abort = no && $cliserv -eq 1 ]] ; then
+  prog=$ODB_FEBINPATH/odbi_client.x
+# the following works too; even if -i & -H not given
+  cmd="$prog -l $dbname -H $host -P $port -T $timeout -Oclihost=$(hostname)"
+  cmd="$cmd $binmode -f $outfil $data_only $bufsize"
+  cmd="$cmd $nulls $limit $showrows $varargs $metadata"
+  [[ "$poolmask" = ""  ]] || cmd="$cmd -p $poolmask"
+  [[ $is_verbose -eq 0 ]] || cmd="$cmd -Overbose"
+  [[ $clean_too  -eq 0 ]] || cmd="$cmd -Oclean"
+  [[ $keep       -eq 0 ]] || cmd="$cmd -Okeep"
+  [[ $fast       -eq 1 ]] || cmd="$cmd -Onoodbsql"
+  [[ $ncpus      -le 1 ]] || cmd="$cmd -# $ncpus"
+  if [[ $silent -eq 1 ]] ; then
+    cmd="$cmd -Osilent"
+  else
+    cmd="$cmd -Onosilent"
+  fi
+  [[  $io_method -eq  5  ]] || cmd="$cmd -Oio_method=$io_method"
+  cmd="$cmd -Ouser=$user"
+  [[ "$my_a_out" = "" ]] || cmd="$cmd -Oexe=$my_a_out"
+  [[ "$workdir"  = "" ]] || cmd="$cmd -Oworkdir=$workdir"
+  if [[ $request_metadata -eq 1 ]] ; then
+    viewname="@" # A dummy table
+    cmd="$cmd -v $viewname"
+  else
+    sqldir=$(dirname $viewname)
+    sfx=$(basename $viewname | perl -ne 'print $1 if (/.*(\.\w+)/);')
+    viewname=$(basename $viewname | perl -pe 's/\..*//; tr/A-Z/a-z/')
+    is_table=$(echo $viewname | perl -ne 'if (m/^\@/) {print 1;} else {print 0;}')
+    if [[ $is_table -eq 1 ]] ; then
+      cmd="$cmd -v $viewname"
+      query_given=0
+    elif [[ "$sfx" = ".so" ]] ; then
+      cmd="$cmd -v $viewname.so"
+      query_given=0
+    else
+      sqlfile=$viewname.sql
+      sqldir=$(\cd $thisdir; \cd $sqldir; pwd)
+      if [[ $query_given -eq 0 && -r $sqldir/$sqlfile ]] ; then
+        query="$(cat $sqldir/$sqlfile);"
+        query_given=1
+      fi
+      if [[ $query_given -eq 1 ]] ; then
+        cmd="$cmd -v $viewname"
+      fi
+    fi
+  fi
+  if [[ $query_given -eq 1 ]] ; then
+    thecmd="$cmd -q '$query' -i '$datapath'"
+  else
+    thecmd="$cmd -i '$datapath'"
+  fi
+  [[ $is_verbose -eq 0 ]] || echo "$thecmd" | perl -pe 's/\s+/ /g; s/$/\n/;' >&4
+
+  #-- Redirect stdout back to its original state (#1) and close the temporary fd#3
+  #   (stderr still flows as usual to #2, unless silenced with -s)
+  exec 1>&3
+  exec 3>$devnull
+
+  #-- Run the extraction 
+  # (output comes to stdout; errors still go to stderr, unless silenced with -s)
+
+  if [[ $silent -eq 1 ]] ; then
+    exec 2>&4
+  fi
+  
+  rc=0
+  if [[ $query_given -eq 1 ]] ; then
+  #-- have to do this way for now, since the shell eats -q '$query' if embedded in the $cmd ;-(
+    exec $cmd -q "$query" -i "$datapath" || rc=$?
+  else
+    exec $cmd -i "$datapath" || rc=$?
+  fi
+
+  #-- Should never endup hier ...
+
+  if [[ $rc -ne 0 ]] ; then
+    echo "***Error(s) were encountered in your client/server-run (rc=$rc):" >&4
+    echo "$thecmd" >&4
+    exit $rc
+  fi
+  exit 0
+fi
+
+#----------------------------------------------------------------------------#
+
+#-- Create composite database by using odbmerge (odbdup)
+if [[ "$dbname" = "" ]] ; then
+  #-- Firstly; extract dbname, if not given :
+  dbname=$(basename "$datapath" | perl -pe 's/\..*//; tr/a-z/A-Z/')
+fi
+
+#-- The "mtimecnt" tries to trace whether input database(s) crucial metadata has changed,
+#   indicating potential changes in the data itself;
+#   We could have 'ls -C1sR' through the datapath(s) to calculate the sum of file sizes;
+#   this could however be potentially very, very time consuming for large amount of files;
+#   Even now the count of dca-files could be big
+
+mtimecnt="0.0"
+new_datapath=""
+
+for d in $datapath
+do
+  if [[ ! -d $d ]] ; then
+    typeset f
+    for f in $d $d.dd $d.sch
+    do
+      if [[ -f $f ]] ; then
+        d=$(dirname $f)
+        break
+      fi
+    done
+  fi
+  if [[ -d $d ]] ; then
+    new_datapath="${new_datapath}$d "
+    mtimecnt=$(echo "$mtimecnt" | $ODB_FEBINPATH/odbfiletime.x $d/*.dd $d/*.iomap $d/dca $d/dca/*.dca 2>$devnull || echo "$mtimecnt")
+  fi
+done
+
+datapath=$(echo "$new_datapath" | perl -pe 's/\s+$//')
+
+if [[ "$test_arch" = linux && -d /dev/shm ]] ; then
+  # Prefer to use RAM-disk (/dev/shm) when available
+  dupdir=/dev/shm
+elif [[ -d "$TMPDIR" ]] ; then
+  dupdir=$TMPDIR
+else
+  dupdir=/tmp
+fi
+
+#-- New (or existing -- for multiple runs) datapath
+
+ddtag=$($ODB_FEBINPATH/odbmd5sum -D"$datapath")
+
+dbpath=${dupdir}/askodb.$USER/$dbname.$ddtag.$mtimecnt
+
+if [[ $clean_too -eq 1 && -d $dbpath ]] ; then
+  rm -rf $dbpath    
+fi
+
+if [[ ! -d "$dbpath" ]] ; then
+  if [[ "$mtimecnt" = "0.0" ]] ; then
+    echo "***Error: Input datapath '$datapath' contains no ODB metadata" >&4
+    abort=yes
+  else
+    odbmerge -i "$datapath" -o $dbpath -l $dbname $zailenz >&4 || {
+      echo "***Error: Cannot 'odbmerge' '$datapath' into '$dbpath' ; dbname='$dbname'" >&4
+      abort=yes
+    } 
+  fi
+  if [[ $abort = no ]] ; then
+    echo "$datapath" > $dbpath/.datapath
+  fi
+fi
+
+if [[ $abort = no ]] ; then
+  datapath="$dbpath"
+fi
+
+if [[ "$datapath" != "" && ! -d "$datapath" ]] ; then
+  datapath=$(dirname "$datapath" || :)
+  if [[ ! -d "$datapath" ]] ; then
+    echo "***Error: Invalid database path '$datapath'. Check your -i option" >&4
+    abort=yes
+  fi
+fi
+
+if [[ "$dbname" = "" && -d "$datapath" ]] ; then
+  cd "$datapath"
+  rc=0
+  \ls -C1 *.dd >$devnull 2>&1 || rc=$?
+  if [[ $rc -eq 0 ]] ; then
+    dbname=$(\ls -C1 *.dd 2>$devnull | head -1)
+    dbname=$(basename $dbname .dd)
+  else
+    echo "***Error: Cannot locate any metadata files '*.dd' under $datapath" >&4
+    abort=yes
+  fi
+  cd $thisdir
+  datapath=$(\cd "$datapath"; pwd)
+fi
+
+if [[ "$dbname" = "" ]] ; then
+  echo "***Error: Invalid database '$dbname'. Check -i option and existence of <dbname>.dd file" >&4
+  abort=yes
+fi
+
+#-- Abort, if necessary
+
+if [[ $abort = yes ]] ; then
+  awk '/#begin/,/#end/' $cmd | egrep -v '#(begin|end)' | sed 's/^#//' >&4
+  exit 1
+fi
+
+#-- Set poolmask related env. variable
+
+if [[ "$poolmask" != "" ]] ; then
+  export ODB_PERMANENT_POOLMASK_$dbname="$poolmask"
+fi
+
+#-- Run use-commands (check, whether your environment has 'use'-command at all!)
+
+if [[ "$use_appl" != "" ]] ; then
+  set +eu
+  for u in $use_appl
+  do
+    use $u >$devnull 2>&1
+  done
+  set -eu
+fi
+
+#*** Check if the fast option will be used --> revert to odbsql
+
+if [[ $fast -eq 1 ]] ; then
+
+  a_out="$ODB_FEBINPATH/odbi_direct.x"  
+
+  if [[ $request_metadata -eq 1 ]] ; then
+    viewname="@" # A dummy table
+    cmd="$cmd -v $viewname"
+  else
+    sqldir=$(dirname $viewname)
+    sfx=$(basename $viewname | perl -ne 'print $1 if (/.*(\.\w+)/);')
+    viewname=$(basename $viewname | perl -pe 's/\..*//; tr/A-Z/a-z/')
+    is_table=$(echo $viewname | perl -ne 'if (m/^\@/) {print 1;} else {print 0;}')
+    if [[ $is_table -eq 1 ]] ; then
+      query_given=0
+    else
+      sqlfile=$viewname.sql
+      sqldir=$(\cd $thisdir; \cd $sqldir; pwd)
+      if [[ $query_given -eq 0 && -r $sqldir/$sqlfile ]] ; then
+        query="$sqldir/$sqlfile"
+        query_given=2
+      fi
+    fi
+  fi
+
+  if [[ $query_given -ge 1 ]] ; then
+    fastquery="$query"
+  else
+    fastquery=""
+  fi
+
+  export ODB_SRCPATH_$dbname=$datapath
+  export ODB_DATAPATH_$dbname=$datapath
+  export ODB_IDXPATH_$dbname=$datapath/idx
+  export ODB_IO_METHOD=5
+
+  #-- Make sure dca-indices are ok
+  if [[ -d $datapath/dca ]] ; then
+    if [[ ! -f $datapath/dca/.dcafixed ]] ; then
+      dcafix -q -i $datapath >&4
+    fi
+  else
+    dcagen -q -z -n -i $datapath >&4
+  fi
+
+else
+
+  fastopt="-F"
+
+  #-- In to the business
+
+  slash2dot="askodb.$user.CY${ODB_MAJORVN}R${ODB_MINORVN}.$test_arch$(echo $datapath | sed 's%/%\.%g')"
+  if [[ "$workdir" = "" ]] ; then
+    defscr=$TMPDIR
+    if [[ "$test_arch" = linux && -d /dev/shm ]] ; then
+      # check available capacity of the local Linux Ramdisk
+      capakb=$(df -kl /dev/shm 2>$devnull | tail -1 | awk '{print $4}')
+      if [[ $capakb -gt 40960 ]] ; then # more than 40MBytes
+        defscr=/dev/shm
+      fi
+    fi
+    workdir=$defscr
+  fi
+  workdir=$workdir/$slash2dot
+
+  if [[ $clean_too -eq 1 && -d $workdir ]] ; then
+    [[ $is_verbose -eq 0 ]] || echo "Cleaning $workdir" >&4
+    rm -rf $workdir
+  fi
+  
+  if [[ ! -d $workdir ]] ; then
+    [[ $is_verbose -eq 0 ]] || echo "Creating $workdir" >&4
+    mkdir -p $workdir
+    compile=1
+  fi
+  [[ $is_verbose -eq 0 ]] || echo "cd $workdir" >&4
+  cd $workdir
+  
+  export ODB_SRCPATH_$dbname=$workdir
+  export ODB_DATAPATH_$dbname=$datapath
+  export ODB_IDXPATH_$dbname=$workdir/idx
+  
+  # but *not* IOASSIGN 
+  for sfx in dd sch flags iomap
+  do
+    if [[ -f $datapath/$dbname.$sfx ]] ; then 
+      if [[ ! -f $dbname.$sfx ]] || \
+         [[ $datapath/$dbname.$sfx -nt $dbname.$sfx ]] ; then
+        cp $datapath/$dbname.$sfx .
+        chmod u+w $dbname.$sfx
+      fi
+    fi
+  done
+  
+  ddfile=$dbname.dd
+  
+  if [[ ! -f $ddfile ]] ; then
+    echo "***Error: The main metadata file '$ddfile' not found" >&4
+    exit 1
+  fi
+  
+  #-- Create fresh IOASSIGN
+  
+  if [[ ! -f $dbname.IOASSIGN ]] ; then
+    create_ioassign -l $dbname -q
+    export IOASSIGN=$dbname.IOASSIGN
+  fi
+  
+  #-- Determine need for recompilation of data layout
+  
+  if [[ $compile -eq 0 ]] ; then
+    if [[ ! -f lib$dbname.a ]] || \
+       [[ ! -f $dbname.ddl_ ]] || \
+       [[ ! -f $dbname.h    ]] || \
+       [[ -f $dbname.sch && $dbname.sch -nt $dbname.ddl_ ]] || \
+       [[ -f $dbname.ddl && $dbname.ddl -nt $dbname.ddl_ ]] || \
+       [[ $ODB_FEBINPATH/odb98.x -nt $dbname.ddl_ ]] || \
+       [[ -f lib$dbname.a && $ODB_FEBINPATH/odb98.x -nt lib$dbname.a ]]; then
+      compile=1
+    fi
+  fi
+  
+  #-- Recompile data layout
+  
+  if [[ $request_metadata -eq 1 ]] ; then
+    viewname="@" # A dummy table
+  fi
+  
+  sqldir=$(dirname $viewname)
+  sfx=$(basename $viewname | perl -ne 'print $1 if (/.*(\.\w+)/);')
+  viewname=$(basename $viewname | perl -pe 's/\..*//; tr/A-Z/a-z/')
+  a_out=./$viewname.x
+  if [[ "$my_a_out" != "" ]] ; then
+    my_a_out=./$(basename $my_a_out)
+    if [[ -x $my_a_out ]] ; then
+      [[ $is_verbose -eq 0 ]] || echo "Using user supplied executable '$my_a_out'" >&4
+      a_out=$my_a_out
+      my_a_out_given=1
+    fi
+  fi
+  a_out_table=./@.x
+  cachefile=$viewname.cache # saves pairs of (poolno,nrows) [not implemented yet]
+  lastquery=Last_Query
+  
+  if [[ ! -x $a_out ]] ; then
+    reexec=0
+  fi
+  
+  if [[ $compile -eq 1 ]] ; then
+    reexec=0
+  fi
+  
+  if [[ $compile -eq 1 ]] ; then
+    odbclean -f -c
+    if [[ ! -f $dbname.sch ]] ; then
+      [[ $is_verbose -eq 0 ]] || echo "Creating data layout $dbname.sch from metadata $dbname.dd ..." >&4
+      dd2ddl $dbname
+    fi
+    [[ $is_verbose -eq 0 ]] || echo "Compiling data layout $dbname.sch ..." >&4
+    odbcomp $dbname.sch # Note: The following can NOT have -z option, since data files are not moved into $workdir
+    if [[ $keep -eq 0 ]] ; then # remove "clutter"
+      rm -f ${dbname}.o ${dbname}_T_*.o
+      rm -f ${dbname}.c ${dbname}_T_*.c
+    fi
+    rm -f $cachefile $lastquery
+  fi
+  
+  #-- Fiddle with the I/O-method and dca
+  
+  if [[ -s $ddfile ]] ; then
+    iom=$(head -1 $ddfile | awk 'BEGIN {n=1;} {if (NF >= 3) n=$3;} END {print n;}')
+  else
+    iom=1
+  fi
+  export ODB_IO_METHOD=$io_method
+  if [[ $io_method -eq 5 && ! -d dca ]] ; then
+    # Try copying first
+    if [[ -d $datapath/dca ]] ; then
+      cp -r $datapath/dca .
+      chmod -R u+rw dca
+      dcafix -q -i $datapath
+    else # Generate (but using non-update [-n] option; ca. 100 x quicker than -u(pdate) option)
+      dcagen -q -z -n -i $datapath
+    fi
+    if [[ ! -d dca ]] ; then # Switch back to database specific I/O-method
+      ODB_IO_METHOD=$iom
+    fi
+  elif [[ -d dca ]] ; then
+    dcafix -q -i $datapath
+  fi
+  
+  #-- Enable access to cache/ directory, if present
+  if [[ -d $datapath/cache ]] ; then
+    rm -rf cache
+    ln -s $datapath/cache .
+  fi
+  
+  #-- Check the need for (lat,lon) radians->degrees conversion
+  export ODB_LATLON_RAD=$(\cd $datapath; $ODB_FEBINPATH/latlon_rad 2>$devnull || echo "-1")
+  
+  #-- Compile SQL
+  
+  is_table=$(echo $viewname | perl -ne 'if (m/^\@/) {print 1;} else {print 0;}')
+  if [[ $is_table -eq 1 ]] ; then
+    sqlfile=$devnull
+    sqldir=""
+  else
+    sqlfile=$viewname.sql
+    sqldir=$(\cd $thisdir; \cd $sqldir; pwd)
+  fi
+  
+  if [[ $is_table       -eq 0 && \
+        $reexec         -eq 0 && \
+        $query_given    -eq 0 && \
+        $my_a_out_given -eq 0 && \
+        "$sfx" != ".so" ]] ; then
+    if [[ ! -f $sqldir/$sqlfile ]] ; then
+      echo "***Error: Cannot locate input SQL-file '$sqldir/$sqlfile'" >&4
+      exit 1
+    fi
+  fi
+  
+  if [[ $is_table -eq 0 && \
+        $my_a_out_given -eq 0 && \
+        "$sfx" != ".so" ]] ; then
+    if [[ $query_given -eq 1 ]] ; then
+      echo "$query" > $sqlfile.new
+    else
+      cp $sqldir/$sqlfile $sqlfile.new
+    fi
+    chmod u+w $sqlfile.new
+    #-- check the last query first
+    lq=$(cat $lastquery 2>$devnull || echo "")
+    if [[ "$lq" = "$viewname" && -f $sqlfile ]] ; then
+      rc=0
+      cmp -s $sqlfile $sqlfile.new || rc=$?
+      if [[ $rc -eq 0 ]] ; then # SQL has not changed
+        rm -f $sqlfile.new
+        sfx=".so"
+      else
+        mv $sqlfile.new $sqlfile
+      fi
+    else
+      mv $sqlfile.new $sqlfile
+    fi
+  fi
+  
+  was_so=1
+  if [[ $is_table -eq 0 && \
+        $my_a_out_given -eq 0 ]] ; then
+    if [[ $compile -eq 1  ]] || \
+       [[ "$sfx" != ".so" ]] || \
+       [[ ! -f ${dbname}_$viewname.o ]] || \
+       [[ $sqlfile -nt ${dbname}_$viewname.o ]] ; then
+      was_so=0
+    fi
+  fi
+  
+  if [[ $reexec -eq 0 && \
+        $is_table -eq 0 && \
+        $was_so -eq 0 ]] ; then
+    export ODB_READONLY=1
+    [[ $is_verbose -eq 0 ]] || echo "Compiling data query $sqlfile for database $dbname ..." >&4
+    odbcomp -w -l $dbname $sqlfile
+    if [[ $keep -eq 0 ]] ; then # remove "clutter" (postponement)
+      keep=2
+    fi
+    rm -f $cachefile $lastquery
+  fi
+  
+  if [[ $is_table -eq 1 ]] ; then
+    export ODB_CONSIDER_TABLES=$(echo $viewname | perl -pe 's#\@(\w+)#/\L$1/#')
+  elif [[ -f ${dbname}_$viewname.c ]] ; then
+    # the following hassle defines you the ODB_CONSIDER_TABLES
+    eval `fgrep '#define ODB_CONSIDER_TABLES' ${dbname}_$viewname.c | awk '{print "export",$2"="$3}'`
+  else
+    export ODB_CONSIDER_TABLES='*'
+  fi
+  export ODB_CONSIDER_TABLES=$(echo "$ODB_CONSIDER_TABLES" | perl -pe 'tr/A-Z/a-z/')
+  
+  if [[ $keep -eq 2 ]] ; then # remove "clutter" ... now
+    rm -f ${dbname}_$viewname.c
+  fi
+  
+  if [[ $compile -eq 1 ]] || \
+     [[ ! -x $a_out    ]] || \
+     [[ lib$dbname.a -nt $a_out ]] ; then
+    relink=1
+  fi
+  
+  #-- Re-link (if necessary)
+  if [[ ! -f $prog.o ]] || \
+     [[ $ODB_LIBPATH/libodbmain.a -nt $prog.o ]] ; then
+    ar xv $ODB_LIBPATH/libodbmain.a $objs
+    relink=1
+  fi
+  
+  if [[ $is_table -eq 1 ]] ; then
+    if [[ ! -x $a_out_table ]] || \
+       [[ $prog.o -nt $a_out_table ]] || \
+       [[ $ODB_LIBPATH/libodb.a -nt $a_out_table ]] || \
+       [[ lib$dbname.a -nt $a_out_table ]] ; then
+      [[ $is_verbose -eq 0 ]] || echo "Creating the executable for direct table accesses $a_out_table ..." >&4
+      odbcc $objs -o $a_out_table -l$dbname
+    fi
+    a_out=$a_out_table
+    relink=0
+  else
+    if [[ ! -x $a_out ]] || \
+       [[ $prog.o -nt $a_out ]] || \
+       [[ $ODB_LIBPATH/libodb.a -nt $a_out ]] ; then
+      relink=1
+    fi
+  fi
+  
+  if [[ $relink -eq 1 ]] ; then
+    [[ $is_verbose -eq 0 ]] || echo "Re-linking the executable $a_out ..." >&4
+    odbcc $objs -o $a_out -l$dbname
+  else
+    [[ $is_verbose -eq 0 ]] || echo "Using pre-linked executable $a_out ..." >&4
+    reexec=1
+  fi
+  
+  #-- Remove cache-file, unless reexec
+  
+  if [[ $reexec -eq 0 ]] ; then
+    rm -f $cachefile $lastquery
+  fi
+  
+  #-- Record the last query
+  
+  if [[ $is_table -eq 0 ]] ; then
+    echo "$viewname" > $lastquery
+  fi
+  
+fi # if [[ $fast -eq 1 ]] ; ... else ...
+  
+#-- The command-line will now be:
+cmd_1="$fastopt $csopt -l $dbname -v $viewname -n $numeric_odb_version -# $ncpus"
+cmd_2="$binmode -f $outfil $data_only $bufsize $nulls $limit $showrows $varargs $metadata"
+
+if [[ "$fastquery" != "" ]] ; then
+  if [[ $query_given -eq 1 ]] ; then
+    cmd="$cmd_1 -q '$fastquery ;' $cmd_2"
+  else
+    cmd="$cmd_1 -Q $fastquery $cmd_2"
+  fi
+else
+  cmd="$cmd_1 $cmd_2"
+fi
+
+[[ $is_verbose -eq 0 ]] || echo "$a_out $cmd" >&4
+
+#-- Redirect stdout back to its original state (#1) and close the temporary fd#3
+#   (stderr still flows as usual to #2, unless silenced with -s)
+exec 1>&3
+exec 3>$devnull
+
+#-- Run data extraction 
+# (output comes to stdout; errors still go to stderr, unless silenced with -s)
+
+if [[ $silent -eq 1 ]] ; then
+  exec 2>$devnull
+fi
+
+if [[ "$debugger" != "" ]] ; then
+  echo "Run the debugger '$debugger' with the following arguments:"
+  echo "$cmd" >&2
+  exec $debugger $a_out
+  rc=1
+else
+  rc=0
+  if [[ "$fastquery" != "" ]] ; then
+    if [[ $query_given -eq 1 ]] ; then
+      exec $a_out $cmd_1 -q "$fastquery ;" $cmd_2 || rc=$?
+    else
+      exec $a_out $cmd_1 -Q $fastquery $cmd_2 || rc=$?
+    fi
+  else
+    exec $a_out $cmd || rc=$?
+  fi
+fi
+
+#-- Should never endup hier ...
+
+if [[ $rc -ne 0 ]] ; then
+  rc=$?
+  echo "***Error(s) were encountered while executing command (rc=$rc) :" >&4
+  echo "$a_out $cmd" >&4
+  exit $rc
+fi
+
+exit 0

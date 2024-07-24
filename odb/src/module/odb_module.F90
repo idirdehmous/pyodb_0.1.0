@@ -1,0 +1,22 @@
+MODULE odb_module
+
+USE PARKIND1  ,ONLY : JPIM, JPRB, JPRD
+
+!
+! Interface to ODB
+!
+! Author: Sami Saarinen, ECMWF, 27-Sep-2000
+! Last updated: 03-Jan-2008 by SS
+!
+
+USE ODB
+USE ODBGETPUT
+USE ODBUTIL
+USE ODBSHARED
+USE ODBMP
+USE ODBSORT
+USE ODBIOMAP
+USE ODBPRINT
+USE ODBSTAT
+
+END MODULE odb_module
