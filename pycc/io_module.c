@@ -166,8 +166,12 @@ static PUBLIC   PyObject*   odbConnect_method ( PyObject *Py_UNUSED(self) , PyOb
 	  if (pdot) *pdot = '\0';
 	     const char suffix[] = ".sch";
 
-	     len = STRLEN(tmp) + 1 + STRLEN(db) + STRLEN(suffix ) + 1;
-	    
+//	     len = STRLEN(tmp) + 1 + STRLEN(db) + STRLEN(suffix ) + 1;
+
+	     int ltmp = get_strlen(tmp) ;
+             int ldb  = get_strlen(db)  ;
+             //int lsuffix= get_strlen( suffix )
+	     len = ltmp + 1 +  ldb + 4 + 1  ; 
 	     FREE(p);
 	     ALLOC(p, len);
 	     snprintf(p, len, "%s/%s%s", tmp, db, suffix);
@@ -228,8 +232,14 @@ static PUBLIC   PyObject*   odbConnect_method ( PyObject *Py_UNUSED(self) , PyOb
     if (poolmask) { /* Set poolmask explicitly for this database */
       char        *env = NULL;
       const char str[] = "ODB_PERMANENT_POOLMASK";
+      int len  ; 
+      //int len          = STRLEN(str) + 1 + STRLEN(p_dbname) + 1 + STRLEN(poolmask) + 1;
+      int lstr = get_strlen(str) ;
+      int ldb  = get_strlen(p_dbname)  ;
+      int lmsk = get_strlen( poolmask  ); 
+      len = lstr + 1 +  ldb + lmsk + 1  ;
       
-      int len          = STRLEN(str) + 1 + STRLEN(p_dbname) + 1 + STRLEN(poolmask) + 1;
+
       ALLOC(env,len);
       snprintf(env, len, "%s_%s=%s", str, p_dbname, poolmask);
       putenv(env);
