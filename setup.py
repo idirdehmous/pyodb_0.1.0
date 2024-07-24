@@ -4,6 +4,8 @@ import os  , sys
 import sysconfig
 from   Cython.Distutils import build_ext
 from   distutils.sysconfig import customize_compiler, get_config_vars
+from Cython.Build import cythonize
+
 
 # IMPORT EXCEPTIONS 
 sys.path.insert(0,"./modules"  )
@@ -109,8 +111,21 @@ pyodb_dca =m2.Module(  pyc_src+"/dca_module.c"    , include , libpath)
 pyodb_info=m3.Module(  pyc_src+"/info_module.c"   , include , libpath)
 pyodb     =m4.Module(  pyc_src+"/pyodb_module.c"  , include , libpath) 
 
+module_list=[ pyodb_io  ,  
+              pyodb_dca , 
+              pyodb_info, 
+              pyodb     ]
+
+
 # Main pyodb module NAME 
-setup( name="pyodb",version=__version__, description="C/Python interface to access data in ODB1", author="Idir Dehmous", author_email="idehmous@meteo.be", ext_modules=[ pyodb_dca ,  pyodb , pyodb_io, pyodb_info ], cmdclass={"build_ext": NoSuffixBuilder} ,install_requiers=[libpath] )
+setup( name="pyodb"                              ,
+       ext_modules = cythonize( module_list )    ,
+       version=__version__                       , 
+       description="C/Python interface to access data in ODB1", 
+       author="Idir Dehmous"                     , 
+       author_email="idehmous@meteo.be"          , 
+       cmdclass={"build_ext": NoSuffixBuilder}   ,
+       install_requiers=[libpath]                )
 
 # TERMINé !
 quit()
