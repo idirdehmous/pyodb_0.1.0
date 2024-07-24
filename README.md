@@ -1,8 +1,8 @@
 ## pyodb_0.1.0
 
-## Descrption & prologue 
-This is the version 0.1.0  BETA of pyodb.<br />
-An interface written in C/Python API to access the ECMWF ODB1 databases
+## Description & prologue 
+This is the BETA version 0.1.0 of pyodb.<br />
+An interface written in C/Python API to access the ECMWF ODB1 databases.<br />
 
 Its aim is to access the ODB tables/columns data and meta data using a direct SQL request
 embadded in python scripts.<br />
@@ -16,11 +16,6 @@ The original C code has been developed by "Sami Saarinen et al" at ECMWF from 19
 Some modifictions have been done to make it compatible with C/Python API ( 3.9 ---> 3.11 ).
 
 ## How it works ?
-
-GENERAL INFO        :
-USED LANGUAGE       : C / python /Fortran 
-NEEDS INSTALLATION  : YES  
-NEEDS COMPILATION   : YES 
 
 ## Dependencies :
         gcc compiler >= 8.4.0    
@@ -82,9 +77,24 @@ print( pyodb.__doc__)
 ## Epilogue 
 -If everything went well,one can use the examples scripts under  'pyodb_0.1.0/tests' and reading the ODB(s) samples included in 'pyodb_0.1.0/odb_samples'. <br />
 
+
+General info
+Used languages      : C / python /Fortran 
+Needs installation  : YES
+Needs compilation   : YES
+Tested with ODB(s)  : RMI ,CHMZ , MetCoOp and CHMI 
+Handled observations: Conventional, GNSS , Radar  & Sat Radiances.
+
+Some limitations   
+Support  formula   SQL statement    : NOT YET 
+  //     OpenMP                     : NOT YET 
+  //     Read/Write to ECMA,CCMA    : NO 
+  //     conversion to ODB2         : NOT YET 
+  //     conversion to MySQL,SQLite : NOT YET 
+
+
 ----------------------------------
 @__DATE              :  2024.07.23
 @__INSITUTE          :  RMI ( Royale Meteorological Institute )
 @__AUTHOR            :  Idir DEHMOUS 
-@__LAST_MODIFICATION :  Up to date. 
-
+@__LAST_MODIFICATION :  None. 
