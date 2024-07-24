@@ -1,3 +1,6 @@
 ODB
 ===
+Original ODB source code  taken from odb_api_bundle-18.8 as sub-package 
+It's mainly the same code as the one in ARPEGE/IFS 
 
+Developer : Saami Saarinen  ECMWF 1998 -- 2004 
