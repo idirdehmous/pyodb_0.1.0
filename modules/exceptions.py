@@ -67,4 +67,9 @@ class pyodbInternalError(Exception):
     Raises error if a problem is found inside the C code or Python/C communication !
     """
     pass
+class pyodbInstallError(Exception):
+    """
+    Raises an error if something wrong occured during building the modules
+    """
+    pass 
 
