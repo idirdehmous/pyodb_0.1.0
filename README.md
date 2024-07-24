@@ -77,23 +77,22 @@ print( pyodb.__doc__)
 -If everything went well,one can use the example scripts under 'pyodb_0.1.0/tests' and reading the ODB(s) samples included in 'pyodb_0.1.0/odb_samples'. <br />
 
 
-General info
-Used languages      : C / python /Fortran 
-Needs installation  : YES
-Needs compilation   : YES
-Tested with ODB(s)  : RMI ,CHMZ , MetCoOp and CHMI 
-Handled observations: Conventional, GNSS , Radar  & Sat Radiances.
+General info        <br />
+Used languages      : C / python /Fortran  <br />
+Needs installation  : YES                  <br />
+Needs compilation   : YES                  <br />
+Tested with ODB(s)  : RMI ,CHMZ , MetCoOp and CHMI  <br />
+Handled observations: Conventional, GNSS , Radar  & Sat Radiances. <br />
 
-Some limitations   
-Supports  formula   SQL statement    : NOT YET   ( i.e  SELECT degrees(lat  ), degrees(lon) ...   )
-  //      OpenMP                     : NOT YET 
-  //      Read/Write to ECMA,CCMA    : NO        ( READ ONLY )
-  //      conversion to ODB2         : NOT YET   ( On going  )
-  //      conversion to MySQL,SQLite : NOT YET   ( On going  )
+Some limitations    <br />
+Supports  formula   SQL statement    : NOT YET   ( i.e  SELECT degrees(lat  ), degrees(lon) ...   ) <br />
+  //      OpenMP                     : NOT YET    <br />
+  //      Read/Write to ECMA,CCMA    : NO        ( READ ONLY ) <br />
+  //      conversion to ODB2         : NOT YET   ( On going  ) <br />
+  //      conversion to MySQL,SQLite : NOT YET   ( On going  ) <br />
 
 
-----------------------------------
-@__DATE              :  2024.07.23
-@__INSITUTE          :  RMI ( Royale Meteorological Institute )
-@__AUTHOR            :  Idir DEHMOUS 
-@__LAST_MODIFICATION :  None. 
+@__DATE              :  2024.07.23    <br />
+@__INSITUTE          :  RMI ( Royale Meteorological Institute )   <br />
+@__AUTHOR            :  Idir DEHMOUS    <br />
+@__LAST_MODIFICATION :  None.      <br />
