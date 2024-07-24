@@ -13,9 +13,6 @@ exec_program(${PYTHON_EXECUTABLE}
              OUTPUT_VARIABLE NUMPY_INCLUDE_DIR
              RETURN_VALUE NUMPY_NOT_FOUND
             )
-if(NUMPY_NOT_FOUND)
-    message(FATAL_ERROR "NumPy headers not found")
-endif()
 
 
 set ( MACROS_DIR     ${CMAKE_SOURCE_DIR}/cmake   )
@@ -31,6 +28,13 @@ include(odb_set_environment)
 add_subdirectory (odb)
 
 # DEFINE INSTALLATION DIR FOR setup.py 
+
+set (CMD   "   cd ${CMAKE_CURRENT_SOURCE_DIR} \n   python setup.py build\n   sudo python  setup.py  install" )
+message ("----------------------------------------------------------" )
+message ("   ")
+message ("      *The variable CMAKE_INSTALL_PREFIX=" ${CMAKE_INSTALL_PREFIX} "\n      *will be written into the file : ${CMAKE_CURRENT_SOURCE_DIR}/odb_install_dir" )
+message ("      *THE CONFIGURATION SUCCEDED  ? \n        make -j Ncpu && make install \n")
+message ("      *BUILD pyodb MODULE WITH  :    \n${CMD}" )
+message ("----------------------------------------------------------")
+message ("   ")
 file( WRITE  ${CMAKE_CURRENT_SOURCE_DIR}/odb_install_dir  ${CMAKE_INSTALL_PREFIX})
-
-
