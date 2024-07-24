@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os, sys  
 from ctypes import cdll  
 from exceptions   import  *  
@@ -42,7 +43,7 @@ class OdbEnv:
             cdll.LoadLibrary(self.libdir+"/"+self.libname  )  
          except:
             OSError
-            raise pyodbLibError("\n--Can't find the shared library libodb.so\n--Please check that it has been installed and added to your python script !") 
+            raise pyodbLibError("\n--Can't find the shared library libodb.so\n--Please check that it has been installed and added to your python script\n--Or use export ODB_INSTALL_LIB=/path/to/../../libodb.so !") 
         
          syspath=os.environ.copy()
          path=syspath["PATH"]+":"+self.bindir
