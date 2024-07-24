@@ -32,9 +32,9 @@ Some modifictions have been done to make it compatible with C/Python API ( 3.8 -
                make install  
 ```
 REMARK:
--By the end the configuration, a file called 'odb_install_dir' will be created by cmake for the next steps 
+-By the end the configuration, a file called 'odb_install_dir' will be created by cmake for the next steps<br />
 
--Once the odb binaries , include and libs are installed, The second step consist in builing and installing the python module itself
+-Once the odb binaries , include and libs are installed, The second step consist in builing and installing the python module itself<br />
 
 ```
         STEP 2 - cd  /path/to/source/of/.../pyodb_0.1.0  
@@ -47,8 +47,8 @@ REMARK:
 ```
 
 ## Testing 
--When a module build from C/Python API is imported, the python statement 'import' initialises some functions involved during the compilation (headers,  libraries etc ). One has then firstly to load the shared objects using 'ctypes module'. 
--The pyodb installation is tested as follow : <br /> 
+-When a module build from C/Python API is imported, the python statement 'import' initialises some functions involved during the compilation (headers,  libraries etc ). One has then firstly to load the shared objects using 'ctypes module'.<br /> 
+-The pyodb installation is tested as follow : 
 ```
 from ctypes import  cdll  
 cdll.LoadLibrary(  "/path/to/odb/libs/libodb.so"  )
