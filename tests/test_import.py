@@ -13,8 +13,6 @@ import os
 from ctypes  import cdll  
 
 
-# LOOK WHERE THE libodb.so   is INSTALLED ( THE PATH IS ASSUMED TO BE STILL IN THE FILE 
-#  odb_install_dir CREATED BY cmake )
 
 odbpath_file="odb_install_dir"
 if os.path.isfile( odbpath_file ):
