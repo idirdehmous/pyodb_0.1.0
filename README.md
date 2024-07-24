@@ -24,7 +24,7 @@ Some modifictions have been done to make it compatible with C/Python API ( 3.9 -
         BISON        >= 3.0.4 
         FLEX         >= 2.6.0 
 
-----> It has been widly developed and tested on ATOS. <br />
+==> It has been widely developed and tested on ATOS. <br />
 So on ATOS  :
    module load   gcc/8.5.0
    module load   python3/3.10.10-01
