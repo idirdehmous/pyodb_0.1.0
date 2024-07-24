@@ -18,7 +18,7 @@ Some modifictions have been done to make it compatible with C/Python API ( 3.8 -
 ## How it works ?
 
 
-## INSTALLATION :  
+## installation :  
 
    ```  
         STEP 0 - clone the code:
@@ -34,7 +34,7 @@ Some modifictions have been done to make it compatible with C/Python API ( 3.8 -
 REMARK:
 -By the end the configuration, a file called 'odb_install_dir' will be created by cmake for the next steps 
 
--Once the odb binaries , include and libs are installed, The second step consist in builing and installing the python module
+-Once the odb binaries , include and libs are installed, The second step consist in builing and installing the python module itself
 
 ```
         STEP 2 - cd  /path/to/source/of/.../pyodb_0.1.0  
@@ -46,6 +46,22 @@ REMARK:
                  python setup.py   install  --prefix=/../../../your/pythonlibs 
 ```
 
-## TESTING & EPILOGUE 
+## Testing 
+-When the modules build from C/Python API are imported, the python statement initialises some functions involved during compilation (headers,  libraries etc ). One has firstly to load the shared objects using 'ctypes module'
+-The pyodb installation is tested as follow :
+```
+from ctypes import  cdll  
+cdll.LoadLibrary(  "/path/to/odb/libs/libodb.so"  )
+
+-If the shared library ( libodb.so) is loaded successfully then 
+```
+import pyodb
+print( pyodb.__doc__) 
+
+-For a complete import test script please see tests/test_import.py  
+
+
+## Epilogue 
+-If everything went well,one can use the exampls scripts under  pyodb_0.1.0/tests and read the ODB(s) samples included in pyodb_0.1.0/odb_samples
 
 
