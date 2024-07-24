@@ -1,5 +1,4 @@
-`
-#-------------------------------------- PROLOGUE ------------------------------------------
+-------------------------------------- PROLOGUE ------------------------------------------
 This is the version 0.1.0  BETA of pyodb 
 An interface written in C/Python API to access the ECMWF ODB1 databases
 
@@ -15,8 +14,8 @@ The original C code has been developed by "Sami Saarinen et al" at ECMWF from 19
 
 Some modifictions have been done to make it compatible with C/Python API ( 3.8 ---> 3.11 ). 
 
---> FOR THE TERMS OF LICENCE PLEASE REFER TO THE FILE 'LICENCE.txt'  
-#-------------------------------------------------------------------------------------------
+ FOR THE TERMS OF LICENCE PLEASE REFER TO THE FILE 'LICENCE.txt'  
+-------------------------------------------------------------------------------------------
 
 
 HOW IT WORKS ?  
