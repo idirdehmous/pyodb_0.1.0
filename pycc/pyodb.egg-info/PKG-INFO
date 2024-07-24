@@ -1,0 +1,24 @@
+Metadata-Version: 2.1
+Name: pyodb
+Version: 0.1.0
+Summary: C/Python interface to request data from the ECMWF ODB old format database (ECMA ;CCMA)
+Author: Idir Dehmous
+Author-email: Idir DEHMOUS <idehmous@meteo.be>
+Maintainer-email: Idir DEHMOUS <idehmous@meteo.be>
+License: Apache 2.0
+        
+Keywords: ODB,ECMA,CCMA,data,conversion,extraction,ECMWF,RMI
+Classifier: Development Status   :: 1 - Beta
+Classifier: Intended Audience    :: Developers ,researchers
+Classifier: Topic                :: Software Development :: Build Tools , ODB API
+Classifier: License              :: OSI Approved :: Apache Software License
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programmin Language  :: C
+Classifier: Operating System     :: OS dependent
+Description-Content-Type: text/markdown
+License-File: LICENSE.txt
+
+pyodb_0.1.0

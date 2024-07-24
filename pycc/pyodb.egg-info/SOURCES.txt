@@ -1,0 +1,12 @@
+LICENSE.txt
+README.md
+pyproject.toml
+setup.py
+/hpcperm/cvah/odb/pyodb_0.1.0/pycc/dca_module.c
+/hpcperm/cvah/odb/pyodb_0.1.0/pycc/info_module.c
+/hpcperm/cvah/odb/pyodb_0.1.0/pycc/io_module.c
+/hpcperm/cvah/odb/pyodb_0.1.0/pycc/pyodb_module.c
+pycc/pyodb.egg-info/PKG-INFO
+pycc/pyodb.egg-info/SOURCES.txt
+pycc/pyodb.egg-info/dependency_links.txt
+pycc/pyodb.egg-info/top_level.txt
