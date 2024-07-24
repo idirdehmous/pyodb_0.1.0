@@ -47,7 +47,7 @@ So on ATOS  : <br />
 REMARK:  <br />
 -By the end the configuration, a file called 'odb_install_dir' will be created by cmake for the next step<br />
 
--Once the odb binaries , include and libs are installed, the second step consist in building and installing the python module itself<br />
+-Once the odb binaries , include and libs are installed, the second step consist on building and installing the python module itself<br />
 
 ```
         STEP 2 - cd  /path/to/source/of/.../pyodb_0.1.0  
