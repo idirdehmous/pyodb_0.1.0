@@ -114,7 +114,7 @@ pyodb     =m4.Module(  pyc_src+"/pyodb_module.c"  , include , libpath)
 module_list=[ pyodb_io  ,  
               pyodb_dca , 
               pyodb_info, 
-              pyodb     ]
+              pyodb ,  "modules/*.py"    ]
 
 
 # Main pyodb module NAME 
