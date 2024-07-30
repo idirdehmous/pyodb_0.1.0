@@ -78,6 +78,30 @@ print( pyodb.__doc__)
 ## Epilogue 
 -If everything went well,one can use the example scripts under 'pyodb_0.1.0/tests' and reading the ODB(s) samples included in 'pyodb_0.1.0/odb_samples'. <br />
 
+===> REMARK :
+It's recommanded to run dcagen and dcagen.x just before archiving your ODB(s). <br /> 
+This will allow pyodb to don't create them on the fly and make it a bit faster.  <br />
+In the BATOR ,canari , screening , minimisation  scripts the bash lines hereafter have to be added :  <br />
+```
+
+Example for screening :
+# NEEDS SCRIPTS  : dcagen, create_ioassign
+# BINARY         : dcagen.x 
+# SCRIPTS AND BINARIES ARE AVAILABLE IN ARPEGE/IFS CODE (to be compiled )
+# OR FROM odb_api_bundle ( ECMWF version=0.18.0)
+
+export PATH=${PATH}:${WORKDIR}
+export ODB_FEBINPATH=${WORKDIR}
+${MPICMD}  ./dcagen  -l CCMA   -d -n -N ${NPROC} -q  -P -e dca.log -i  ${WORKDIR}/var_db/CCMA
+
+Now CCMA contains DCA files 
+cp -rf   ${WORKDIR}/var_db/CCMA     /somewhere/in/archive../../
+
+
+```
+
+
+
 
 General info        <br />
 Used languages      : C / python /Fortran  <br />
