@@ -42,6 +42,7 @@ env.InitEnv ()
 # NOW pyodb modules could be imported !
 from pyodb       import   pyodbFetch
 from pyodb_io    import   odbConnect , odbClose 
+from pyodb_info  import   odbVarno 
 
 # IN CASE THE DCA FILE HAVE BEEN CREATED pyodb_dca IS NOT NEED !
 from pyodb_dca   import   pyodbDca  
@@ -50,7 +51,7 @@ from pyodb_dca   import   pyodbDca
 p=ParseString ()
 db_type = p.getDb ( path=dbpath )[0]  # ECMA or CCMA 
 db_name = p.getDb ( path=dbpath )[1]  # ECMA.<obstype> or CCMA 
-
+#odbVarno()
 
 # SQL QUERY 
 sql="select distinct statid, lat, lon ,obsvalue , varno , date , time from hdr,body"
@@ -64,9 +65,9 @@ if dstat==-1:
    print("--Failed to create DCA files !" );   
    sys.exit(2)
 
-#sqlfile="sql/ccma_view.sql"
+sqlfile="sql/ccma_view_radar.sql"
 # THE METHOD COULD BE CALLED WITH sql QUERY or  sql file  (ONE OF THEM REQUIERED  !)
-rows=pyodbFetch( dbpath , sql_query = sql)  #, queryfile=sqlfile   )
+rows=pyodbFetch( dbpath ,queryfile = sqlfile )
 
 
 # DUMP ROWS 
@@ -74,14 +75,19 @@ lats=[]
 lons=[]
 obs =[]
 for row in   rows:
-    print (row )
-    lats.append(180.*row[1]/3.14)
-    lons.append(180.*row[2]/3.14)
-    obs.append ( row[3] )
+    #print (row )
+    if row[3] > -1.7E+10:
+       lats.append(180.*row[1]/3.14)
+       lons.append(180.*row[2]/3.14)
+       obs.append ( row[3] )
 
 # DOMAIN BOUNDARIES 
-if len(lats) != 0: ulat=max(lats)+1.5 ; llat=min(lats)-1.5
-if len(lons) != 0: ulon=max(lons)+1.5 ; llon=min(lons)-1.5
+#if len(lats) != 0: 
+ulat=max(lats)+1.5 
+llat=min(lats)-1.5
+#if len(lons) != 0: 
+ulon=max(lons)+1.5 
+llon=min(lons)-1.5
 
 # PLOT 
 fig = plt.figure(figsize=(10, 15))
