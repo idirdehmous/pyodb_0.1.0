@@ -179,7 +179,7 @@ static PyObject *pyodbFetch_method( PyObject* Py_UNUSED(self) , PyObject *args ,
      if ( nrows == PyLong_FromLong( 0 ) ){
 
          printf( "--The SQL request returned no data.\n") ;
-	 printf( "--please check the query or make sure that the ODB has been shuflled ! \n" )   ;
+	 printf( "--please check the query or make sure that the ODB has been shuffled ! \n" )   ;
         
      }
      //PyObject* cnt = reset_counter ( &num_rows  ) ; 
