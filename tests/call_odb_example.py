@@ -53,6 +53,9 @@ p.ParseQuery( sql )
 #sqlfile="ccma_view.sql"
 
 iret  = odbConnect ( odbdir=dbpath+"/"+db_name  , mode="r")
+
+# dcagen MUST FIND IOASSIGN FILE (export is as env variable)
+env.OdbVars["CCMA.IOASSIGN"]="/".join(  (dbpath, "CCMA.IOASSIGN" ) )
 dstat = pyodbDca   ( dbpath=dbpath  ,  db=db_name  , ncpu =8 )
 
 if dstat==-1:   
@@ -63,8 +66,8 @@ if dstat==-1:
 # THE METHOD COULD BE CALLED WITH sql QUERY or  sql file  (ONE IS MANDATORY !)
 rows=pyodbFetch( path=dbpath , sql_query = sql)  #, queryfile=sqlfile   )
 print("Number of rows fetch from ODB ", db_name  ,  len(rows ))   
-#for row in   rows:
-    #print( row )
+for row in   rows:
+    print( row )
 
 # Close the interface !
 odbClose( iret)

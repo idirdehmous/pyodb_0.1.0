@@ -59,6 +59,10 @@ p.ParseQuery( sql )
 
 
 iret  = odbConnect ( odbdir=dbpath+"/"+db_name  , mode="r")
+
+# dcagen MUST FIND IOASSIGN FILE (export is as env variable)
+env.OdbVars["CCMA.IOASSIGN"]="/".join(  (dbpath, "CCMA.IOASSIGN" ) )
+
 dstat = pyodbDca   ( dbpath=dbpath  ,  db=db_name  , ncpu =8 )
 
 if dstat==-1:   
