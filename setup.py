@@ -41,7 +41,7 @@ except:
 
 try:
    _file_ =  open( odbpath_file  , "r" )
-   odb_install_dir = _file_.readline()  
+   odb_install_dir = _file_.readline().rstrip()
 except:
    FileNotFoundError
    raise pyodbInstallError("Problem while reading the odb_install_dir file.\nBuilding the module will FAIL !")  
