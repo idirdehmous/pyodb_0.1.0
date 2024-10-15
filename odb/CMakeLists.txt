@@ -76,7 +76,7 @@ if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU"  )
 
 	#  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -O0 -rdynamic -finstrument-functions")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -w")
-  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS}  -fPIC -ffree-line-length-none -fallow-argument-mismatch")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS}  -fPIC -ffree-line-length-none -Wno-argument-mismatch")
   set(CMAKE_Fortran_FLAGS_DEBUG "-g -O0 -fcheck=bounds")
   set(CMAKE_Fortran_FLAGS_RELEASE "-O2")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--as-needed")
