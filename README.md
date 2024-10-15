@@ -40,7 +40,7 @@ So on ATOS  : <br />
         STEP 1 - FIRST, CREATE A BUILD DIRECORY TO INSTALL THE ODB LIBRARIES.
                mkdir -p  build_odb  
                cd build_odb 
-               cmake -DCMAKE_INSTALL_PREFIX=/path/to/the/odb/install/dir     ../pyodb_0.1.0 
+               cmake -DCMAKE_INSTALL_PREFIX=/path/to/the/odb/install/dir   ../pyodb_0.1.0 
                make -j ncpu    ( has been tested with a maximum of 4  cpus  ) 
                make install  
 ```
