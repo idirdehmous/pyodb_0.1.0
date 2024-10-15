@@ -27,6 +27,7 @@ sfx  =  sysconfig.get_config_var('EXT_SUFFIX')
 # CWD 
 pwd=os.getenv("PWD")
 
+
 # NAME OF odb lib  &  PATH (Written already by cmake )
 odbpath_file="odb_install_dir"
 try:
