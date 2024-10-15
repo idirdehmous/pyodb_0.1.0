@@ -2,9 +2,10 @@ cmake_minimum_required(VERSION 3.15)
 cmake_policy(SET CMP0002 NEW)
 project( pyodb )
 
-find_package(PythonInterp   REQUIRED)
-find_package(PythonLibs     REQUIRED)
-
+# DEPRECATED cmake >=3.20
+#find_package(PythonInterp   REQUIRED)
+#find_package(PythonLibs     REQUIRED)
+find_package (Python3 COMPONENTS Interpreter Development)
 
 
 # This comes to hand if we also need to use the NumPy C API
